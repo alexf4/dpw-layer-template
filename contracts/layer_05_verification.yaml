@@ -1,0 +1,315 @@
+# =============================================================================
+# DPW Open Platform — Layer 05: Verification
+# =============================================================================
+#
+# PURPOSE
+#   This layer performs identity and eligibility factor verification against
+#   authoritative data sources. A 3rd party implementing this layer queries
+#   relevant data sources (with applicant consent) to verify claimed identity,
+#   income, residency, and household composition.
+#
+# REFERENCE IMPLEMENTATION
+#   VMI/DiCIT (Verification of Multiple Inputs / Digital Identity and
+#   Credential Integration Technology) is the reference implementation for
+#   this layer. 3rd party services should be compatible with the data
+#   structures and status semantics defined here.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 5
+  name: verification
+  description: >
+    Multi-factor verification layer. Queries authoritative data sources to
+    verify applicant-provided claims about identity, income, residency, and
+    household composition. Operates under explicit applicant consent.
+    VMI/DiCIT is the reference implementation.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform requesting verification of one or more
+    factors. The consent_token proves the applicant has authorized the
+    data lookups — your service must validate this token before querying
+    any external data source.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - applicant_identifier
+      - verification_types
+      - consent_token
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code. Determines which authoritative
+          data sources are available and applicable (e.g., state wage records).
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 5 for
+          this contract.
+        enum: [5]
+        example: 5
+
+      # --- Layer-specific fields ---
+
+      applicant_identifier:
+        type: string
+        description: >
+          Opaque platform-issued handle for the applicant. Your service uses
+          this to resolve the applicant's identity attributes from the DPW
+          Identity Resolution API before querying verification sources.
+        example: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
+
+      verification_types:
+        type: array
+        description: >
+          One or more verification factors to check in this request.
+          Your service must attempt all requested types and report individual
+          results in verification_results.
+            identity   — Verify applicant identity against authoritative ID sources
+                         (e.g., SSA, state DMV, login.gov).
+            income     — Verify income claims against wage records, IRS data,
+                         or state unemployment records.
+            residency  — Verify current address against USPS, utility records,
+                         or voter registration.
+            household  — Verify household composition against vital records
+                         or other authoritative sources.
+        items:
+          type: string
+          enum:
+            - identity
+            - income
+            - residency
+            - household
+        minItems: 1
+        uniqueItems: true
+        example:
+          - identity
+          - income
+
+      consent_token:
+        type: string
+        description: >
+          A signed token issued by the DPW platform representing the applicant's
+          informed consent to the data lookups in verification_types. Your service
+          MUST validate this token's signature and scope before executing any
+          queries. Reject with HTTP 403 if the token is invalid or expired.
+          Token format and validation endpoint are defined in the DPW
+          Consent Token Specification (see platform developer docs).
+        example: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJBUFBMLTg4ZjNhMmMxIiwic2NvcGUiOlsiaWRlbnRpdHkiLCJpbmNvbWUiXSwiZXhwIjoxNzc2MjkxNjAwfQ.signature"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 5
+    applicant_identifier: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
+    verification_types:
+      - identity
+      - income
+    consent_token: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJBUFBMLTg4ZjNhMmMxIiwic2NvcGUiOlsiaWRlbnRpdHkiLCJpbmNvbWUiXSwiZXhwIjoxNzc2MjkxNjAwfQ.signature"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. The overall status summarizes the aggregate result across all
+    requested verification types. Per-type results are in verification_results.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - verification_results
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Aggregate verification outcome across all requested types.
+            verified — All requested types returned confirmed matches.
+            partial  — Some types verified; others failed or are pending.
+                       See verification_results for per-type detail.
+            failed   — One or more types returned a definitive non-match.
+            pending  — Verification initiated but results not yet available
+                       (e.g., asynchronous data source). Platform will re-poll.
+        enum:
+          - verified
+          - partial
+          - failed
+          - pending
+        example: "partial"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the aggregate outcome.
+        example: "Identity verified. Income verification returned a discrepancy — routed to exception handling."
+
+      # --- Layer-specific response fields ---
+
+      verification_results:
+        type: object
+        description: >
+          Per-type verification results. Each key is a verification_type
+          from the request. Each value is an object describing the outcome
+          for that type. Keys not in the request should be omitted.
+          Required fields per result object:
+            status  (string) — "verified" | "failed" | "pending" | "unavailable"
+            source  (string) — The authoritative data source queried.
+            detail  (string) — Human-readable summary of the result.
+          Optional fields per result object:
+            matched_value (string) — The value confirmed by the data source
+              (masked or generalized as appropriate for the data type).
+            discrepancy   (object) — Present only when a mismatch was found.
+        additionalProperties:
+          type: object
+          required:
+            - status
+            - source
+            - detail
+          properties:
+            status:
+              type: string
+              enum: [verified, failed, pending, unavailable]
+            source:
+              type: string
+            detail:
+              type: string
+            matched_value:
+              type: string
+            discrepancy:
+              type: object
+              additionalProperties: true
+        example:
+          identity:
+            status: "verified"
+            source: "SSA Consent Based Social Security Number Verification (CBSV)"
+            detail: "Name, SSN, and DOB confirmed against SSA records."
+            matched_value: "SSN: ***-**-6789"
+          income:
+            status: "failed"
+            source: "IRS Income Verification Express Service (IVES)"
+            detail: "IRS AGI ($45,600/yr) exceeds self-attested income ($25,200/yr)."
+            discrepancy:
+              self_attested_annual_usd: 25200
+              irs_agi_annual_usd: 45600
+              delta_usd: 20400
+
+  examples:
+    all_verified:
+      case_id: "CASE-2026-PA-00041880"
+      status: "verified"
+      message: "All requested verification types confirmed against authoritative sources."
+      verification_results:
+        identity:
+          status: "verified"
+          source: "SSA CBSV"
+          detail: "Identity confirmed."
+          matched_value: "SSN: ***-**-6789"
+        income:
+          status: "verified"
+          source: "IRS IVES"
+          detail: "Self-attested income within $200/yr of IRS AGI."
+          matched_value: "Annual AGI range: $24,800–$26,000"
+
+    partial_with_discrepancy:
+      case_id: "CASE-2026-PA-00041872"
+      status: "partial"
+      message: "Identity verified. Income verification returned a discrepancy — routed to exception handling."
+      verification_results:
+        identity:
+          status: "verified"
+          source: "SSA CBSV"
+          detail: "Name, SSN, and DOB confirmed."
+          matched_value: "SSN: ***-**-6789"
+        income:
+          status: "failed"
+          source: "IRS IVES"
+          detail: "IRS AGI ($45,600/yr) exceeds self-attested income ($25,200/yr)."
+          discrepancy:
+            self_attested_annual_usd: 25200
+            irs_agi_annual_usd: 45600
+            delta_usd: 20400
+
+    pending_async:
+      case_id: "CASE-2026-PA-00041881"
+      status: "pending"
+      message: "Income verification query submitted to state wage records. Results expected within 24 hours."
+      verification_results:
+        income:
+          status: "pending"
+          source: "PA State Wage Records (UC)"
+          detail: "Asynchronous query submitted. Platform will re-poll this endpoint."
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    You MUST validate the consent_token before making any data source queries.
+    Use the DPW Consent Token Validation endpoint (see platform developer docs).
+    An invalid or expired token must result in HTTP 403 — do not return a
+    business-logic response for unauthorized requests.
+  - >
+    The consent_token scope field lists which verification_types the applicant
+    consented to. Do not query sources for types not included in the token scope,
+    even if they appear in verification_types.
+  - >
+    For status "pending", the DPW platform will re-invoke this endpoint at
+    intervals (default: every 4 hours, up to 72 hours) using the same request.
+    Your service must be idempotent — return results as they become available
+    without creating duplicate data source queries.
+  - >
+    matched_value fields must be masked or generalized per applicable data use
+    agreements (e.g., CBSV terms prohibit returning full SSNs). Consult the
+    data source's DUA before populating this field.
+  - >
+    If a data source is temporarily unavailable, set that type's status to
+    "unavailable" and the overall status to "partial". Do not hard-fail the
+    entire verification because one source is down.
+  - >
+    Discrepancies detected here may automatically trigger a Layer 04
+    (Exception Handling) invocation by the platform. Your per-type result
+    detail and discrepancy object will be passed as exception_data.

@@ -1,0 +1,369 @@
+# =============================================================================
+# DPW Open Platform — Layer 09: Eligibility & Enrollment
+# =============================================================================
+#
+# PURPOSE
+#   This layer performs the formal eligibility determination for one or more
+#   benefit programs and, if eligible, initiates enrollment. A 3rd party
+#   implementing this layer applies program rules (income limits, asset tests,
+#   categorical eligibility, etc.) against the determination data assembled
+#   by prior layers and returns a structured determination result.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 9
+  name: eligibility_enrollment
+  description: >
+    Eligibility determination and enrollment layer. Applies program-specific
+    eligibility rules to assembled case data and returns determinations for
+    each requested program. On approval, initiates enrollment and returns
+    enrollment details for use by Layer 10 (Benefit Distribution).
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform once verification (Layer 05), external
+    validation (Layer 06), and document review (Layer 07) are complete. The
+    determination_data object contains the consolidated, verified data the
+    eligibility engine should use — do not re-query external sources from
+    within this layer; use what is provided.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - program_codes
+      - determination_data
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code. Determines which program rules,
+          income thresholds, and asset limits apply.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 9 for
+          this contract.
+        enum: [9]
+        example: 9
+
+      # --- Layer-specific fields ---
+
+      program_codes:
+        type: array
+        description: >
+          The DPW program codes for which eligibility should be determined.
+          Your service must return a determination for each program code.
+        items:
+          type: string
+        minItems: 1
+        example:
+          - "SNAP"
+          - "MEDICAID"
+          - "CHIP"
+
+      determination_data:
+        type: object
+        description: >
+          Consolidated, platform-assembled case data for the eligibility
+          determination. This is the single authoritative input — do not
+          supplement it with independent external queries. Common fields:
+            household_size         (integer) — Number of people in the household.
+            gross_monthly_income   (number)  — Gross monthly income (verified).
+            net_monthly_income     (number)  — Net monthly income after deductions.
+            liquid_assets          (number)  — Total liquid assets.
+            categorical_eligibility (object) — Flags for categorical eligibility
+                                               (e.g., SSI recipient, TANF household).
+            verified_residency     (boolean) — Whether residency was verified.
+            verified_identity      (boolean) — Whether identity was verified.
+            household_members      (array)   — Per-member data for household programs.
+            program_specific       (object)  — Map of program_code to program-specific
+                                               supplemental fields (e.g., disability
+                                               status for Medicaid waiver programs).
+        additionalProperties: true
+        example:
+          household_size: 3
+          gross_monthly_income: 2800
+          net_monthly_income: 2200
+          liquid_assets: 650
+          categorical_eligibility:
+            tanf_household: false
+            ssi_recipient: false
+          verified_residency: true
+          verified_identity: true
+          household_members:
+            - member_id: "MBR-001"
+              age: 34
+              relationship: "self"
+              income: 2800
+            - member_id: "MBR-002"
+              age: 8
+              relationship: "child"
+              income: 0
+            - member_id: "MBR-003"
+              age: 6
+              relationship: "child"
+              income: 0
+          program_specific:
+            MEDICAID:
+              disability_claimed: false
+              pregnancy: false
+            CHIP:
+              all_children_uninsured: true
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 9
+    program_codes:
+      - "SNAP"
+      - "MEDICAID"
+      - "CHIP"
+    determination_data:
+      household_size: 3
+      gross_monthly_income: 2800
+      net_monthly_income: 2200
+      liquid_assets: 650
+      categorical_eligibility:
+        tanf_household: false
+        ssi_recipient: false
+      verified_residency: true
+      verified_identity: true
+      household_members:
+        - member_id: "MBR-001"
+          age: 34
+          relationship: "self"
+          income: 2800
+        - member_id: "MBR-002"
+          age: 8
+          relationship: "child"
+          income: 0
+        - member_id: "MBR-003"
+          age: 6
+          relationship: "child"
+          income: 0
+      program_specific:
+        MEDICAID:
+          disability_claimed: false
+          pregnancy: false
+        CHIP:
+          all_children_uninsured: true
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200. The overall status
+    reflects the aggregate result. Per-program detail is in eligible_programs,
+    ineligible_reasons, and enrollment_details. The platform passes
+    enrollment_details to Layer 10 (Benefit Distribution) for approved programs.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - eligible_programs
+      - ineligible_reasons
+      - enrollment_details
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Aggregate determination outcome across all requested programs.
+            eligible   — Applicant is eligible for all requested programs.
+            ineligible — Applicant is ineligible for all requested programs.
+            partial    — Eligible for some programs, ineligible for others.
+            pending    — Determination cannot be completed yet (e.g., awaiting
+                         additional verification). Case remains open.
+        enum:
+          - eligible
+          - ineligible
+          - partial
+          - pending
+        example: "partial"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the determination for caseworker visibility.
+        example: "Eligible for SNAP and CHIP. Ineligible for MEDICAID: income exceeds 138% FPL."
+
+      # --- Layer-specific response fields ---
+
+      eligible_programs:
+        type: array
+        description: >
+          List of program codes for which the applicant has been determined
+          eligible. Empty array if status is "ineligible".
+        items:
+          type: string
+        example:
+          - "SNAP"
+          - "CHIP"
+
+      ineligible_reasons:
+        type: object
+        description: >
+          A map from program_code to a human-readable reason for ineligibility.
+          Only include programs from the request that were determined ineligible.
+          Reasons must be factual, policy-grounded, and appropriate for
+          inclusion in an adverse action notice (Layer 08).
+        additionalProperties:
+          type: string
+        example:
+          MEDICAID: "Household income ($2,800/mo) exceeds 138% Federal Poverty Level ($2,311/mo) for a family of 3."
+
+      enrollment_details:
+        type: object
+        description: >
+          A map from program_code to enrollment metadata for eligible programs.
+          The platform passes these objects to Layer 10 (Benefit Distribution).
+          Common fields per program:
+            enrollment_id     (string)  — Unique enrollment record ID in your system.
+            effective_date    (string)  — ISO8601 date benefits begin.
+            benefit_period    (string)  — Duration of the approval (e.g., "12 months").
+            benefit_amount    (number)  — Monthly benefit amount where applicable.
+            certification_end (string)  — ISO8601 date the certification period ends.
+        additionalProperties:
+          type: object
+          additionalProperties: true
+        example:
+          SNAP:
+            enrollment_id: "ENR-SNAP-PA-20260418-009921"
+            effective_date: "2026-05-01"
+            benefit_period: "12 months"
+            benefit_amount: 536
+            certification_end: "2027-04-30"
+          CHIP:
+            enrollment_id: "ENR-CHIP-PA-20260418-009922"
+            effective_date: "2026-05-01"
+            benefit_period: "12 months"
+            benefit_amount: null
+            certification_end: "2027-04-30"
+
+  examples:
+    partial_determination:
+      case_id: "CASE-2026-PA-00041872"
+      status: "partial"
+      message: "Eligible for SNAP and CHIP. Ineligible for MEDICAID: income exceeds 138% FPL."
+      eligible_programs:
+        - "SNAP"
+        - "CHIP"
+      ineligible_reasons:
+        MEDICAID: "Household income ($2,800/mo) exceeds 138% Federal Poverty Level ($2,311/mo) for a family of 3."
+      enrollment_details:
+        SNAP:
+          enrollment_id: "ENR-SNAP-PA-20260418-009921"
+          effective_date: "2026-05-01"
+          benefit_period: "12 months"
+          benefit_amount: 536
+          certification_end: "2027-04-30"
+        CHIP:
+          enrollment_id: "ENR-CHIP-PA-20260418-009922"
+          effective_date: "2026-05-01"
+          benefit_period: "12 months"
+          benefit_amount: null
+          certification_end: "2027-04-30"
+
+    fully_eligible:
+      case_id: "CASE-2026-PA-00041880"
+      status: "eligible"
+      message: "Applicant is eligible for all requested programs."
+      eligible_programs:
+        - "SNAP"
+        - "MEDICAID"
+      ineligible_reasons: {}
+      enrollment_details:
+        SNAP:
+          enrollment_id: "ENR-SNAP-PA-20260418-009930"
+          effective_date: "2026-05-01"
+          benefit_period: "12 months"
+          benefit_amount: 744
+          certification_end: "2027-04-30"
+        MEDICAID:
+          enrollment_id: "ENR-MCD-PA-20260418-009931"
+          effective_date: "2026-05-01"
+          benefit_period: "12 months"
+          benefit_amount: null
+          certification_end: "2027-04-30"
+
+    fully_ineligible:
+      case_id: "CASE-2026-PA-00041881"
+      status: "ineligible"
+      message: "Applicant does not meet income or asset requirements for any requested programs."
+      eligible_programs: []
+      ineligible_reasons:
+        SNAP: "Liquid assets ($12,500) exceed the $2,750 resource limit for households without a member age 60+ or disabled."
+        MEDICAID: "Household income ($5,200/mo) exceeds 138% Federal Poverty Level for household size."
+      enrollment_details: {}
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    Use only the data in determination_data for your eligibility calculation.
+    The platform guarantees this data has passed through Layers 05 and 06
+    before reaching this layer. Independent re-querying of external sources
+    is prohibited and creates auditability gaps.
+  - >
+    Income thresholds, asset limits, and FPL percentages are state- and
+    year-specific. Your service is responsible for maintaining current policy
+    tables by state_code. The platform does not provide policy parameters.
+  - >
+    For status "pending", the platform will re-invoke this layer when the
+    blocking condition is resolved (e.g., after a Layer 05 re-check completes).
+    Describe the blocking condition clearly in message.
+  - >
+    ineligible_reasons text will be used verbatim (or near-verbatim) in
+    adverse action notices sent via Layer 08. Write reasons in plain language
+    that can be understood by an applicant without a legal background, and
+    cite the applicable federal poverty level or rule threshold.
+  - >
+    enrollment_details for each eligible program will be passed as input to
+    Layer 10 (Benefit Distribution). Include all fields Layer 10 will need
+    to set up benefit issuance, particularly benefit_amount and effective_date.
+  - >
+    For programs with no fixed benefit_amount (e.g., Medicaid as health
+    insurance), set benefit_amount to null. Layer 10 will handle such programs
+    through non-monetary distribution methods.

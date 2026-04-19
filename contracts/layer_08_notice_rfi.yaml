@@ -1,0 +1,287 @@
+# =============================================================================
+# DPW Open Platform — Layer 08: Notice / RFI
+# =============================================================================
+#
+# PURPOSE
+#   This layer handles all formal written communications between the agency
+#   and the applicant or beneficiary. This includes outbound agency notices
+#   (decisions, requests for information, hearing notices) and inbound
+#   applicant responses. A 3rd party implementing this layer acts as the
+#   notice management system — composing, delivering, and tracking notices
+#   and RFI (Request for Information) responses.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 8
+  name: notice_rfi
+  description: >
+    Notice and Request for Information (RFI) management layer. Handles both
+    outbound communications (agency to applicant/beneficiary) and inbound
+    responses (applicant to agency). Supports eligibility notices, adverse
+    action notices, RFIs, hearing notices, and acknowledgment of applicant
+    responses.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform to send or register a notice or RFI.
+    The direction field determines whether this is an outbound notice
+    (agency to applicant) or an inbound response (applicant to agency).
+    The content object carries the notice body and may include structured
+    data alongside narrative text.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - direction
+      - notice_type
+      - content
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code. Used to apply state-specific
+          notice formatting, language requirements, and delivery channel rules.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 8 for
+          this contract.
+        enum: [8]
+        example: 8
+
+      # --- Layer-specific fields ---
+
+      direction:
+        type: string
+        description: >
+          Indicates the flow of the communication.
+            outbound — Agency sending a notice or RFI to the applicant/beneficiary.
+            inbound  — Recording an applicant's response to an RFI or notice.
+        enum:
+          - outbound
+          - inbound
+        example: "outbound"
+
+      notice_type:
+        type: string
+        description: >
+          A code identifying the type of notice or communication. Your service
+          registration should define the full set of types it supports. Common
+          values include:
+            ELIGIBILITY_NOTICE    — Formal notice of eligibility determination.
+            ADVERSE_ACTION        — Adverse action notice (denial, reduction, termination).
+            RFI                   — Request for Information; requires applicant response.
+            RFI_RESPONSE          — Applicant's response to an RFI (direction: inbound).
+            HEARING_NOTICE        — Notice of scheduled hearing date.
+            CONFIRMATION          — Application or action confirmation.
+            GENERAL_CORRESPONDENCE — Non-required correspondence.
+        example: "RFI"
+
+      content:
+        type: object
+        description: >
+          The body of the notice or response. Structure is flexible but should
+          include at minimum a text narrative. Outbound notices should also
+          include delivery channel guidance. Common fields:
+            narrative       (string)  — Human-readable text body of the notice.
+            template_id     (string)  — Optional ID of a pre-approved notice template
+                                        in your system. If provided, narrative may
+                                        be omitted and the template used instead.
+            language_code   (string)  — BCP-47 language code (default: "en-US").
+            attachments     (array)   — List of document_ids from Layer 07 to attach.
+            delivery_channels (array) — Preferred delivery methods: "mail", "email",
+                                        "portal", "sms". Your service delivers via
+                                        available channels for the applicant.
+            applicant_reference (string) — For inbound responses: the notice_id
+                                           being responded to.
+        additionalProperties: true
+        example:
+          narrative: >
+            We are reviewing your application for SNAP benefits (Case: CASE-2026-PA-00041872).
+            To complete your eligibility determination, please provide a copy of your most
+            recent pay stub within 10 business days. Failure to respond may result in denial
+            of benefits.
+          language_code: "en-US"
+          delivery_channels:
+            - "portal"
+            - "mail"
+          template_id: "PA-RFI-INCOME-001"
+
+      response_deadline:
+        type: string
+        description: >
+          ISO 8601 datetime by which the applicant must respond (for outbound
+          RFIs) or by which the agency must act (for hearing notices). Omit
+          for non-deadline communications.
+        format: date-time
+        required: false
+        example: "2026-04-28T23:59:59Z"
+
+  examples:
+    outbound_rfi:
+      case_id: "CASE-2026-PA-00041872"
+      state_code: "PA"
+      layer_id: 8
+      direction: "outbound"
+      notice_type: "RFI"
+      response_deadline: "2026-04-28T23:59:59Z"
+      content:
+        narrative: >
+          We are reviewing your SNAP application. Please submit your most recent
+          pay stub within 10 business days.
+        language_code: "en-US"
+        delivery_channels:
+          - "portal"
+          - "mail"
+        template_id: "PA-RFI-INCOME-001"
+
+    inbound_rfi_response:
+      case_id: "CASE-2026-PA-00041872"
+      state_code: "PA"
+      layer_id: 8
+      direction: "inbound"
+      notice_type: "RFI_RESPONSE"
+      content:
+        narrative: "Applicant uploaded pay stub via portal on 2026-04-22."
+        applicant_reference: "NOTICE-PA-20260418-003301"
+        attachments:
+          - "DOC-PA-20260418-007741"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. The notice_id is the stable identifier for this notice record,
+    used in audit trails and for linking inbound responses to their originating
+    outbound notice.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - notice_id
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Outcome of the notice/RFI operation.
+            sent         — Outbound notice successfully dispatched to applicant.
+            received     — Inbound response recorded in the notice management system.
+            acknowledged — Notice confirmed as received/read by the applicant
+                           (e.g., portal read receipt, applicant acknowledgment click).
+        enum:
+          - sent
+          - received
+          - acknowledged
+        example: "sent"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the outcome.
+        example: "RFI notice sent to applicant via portal and mail. Response deadline: 2026-04-28."
+
+      # --- Layer-specific response fields ---
+
+      notice_id:
+        type: string
+        description: >
+          Stable unique identifier for this notice record in your system.
+          Outbound notice_ids are passed back in inbound RFI_RESPONSE content
+          as applicant_reference to link the response to the original notice.
+          Must be non-empty on all status values.
+        example: "NOTICE-PA-20260418-003301"
+
+  examples:
+    sent_outbound_rfi:
+      case_id: "CASE-2026-PA-00041872"
+      status: "sent"
+      message: "RFI notice sent to applicant via portal and mail. Response deadline: 2026-04-28."
+      notice_id: "NOTICE-PA-20260418-003301"
+
+    received_inbound_response:
+      case_id: "CASE-2026-PA-00041872"
+      status: "received"
+      message: "Applicant RFI response recorded. Document DOC-PA-20260418-007741 attached to case."
+      notice_id: "NOTICE-PA-20260422-003450"
+
+    acknowledged:
+      case_id: "CASE-2026-PA-00041880"
+      status: "acknowledged"
+      message: "Eligibility notice acknowledged by applicant via portal on 2026-04-18T15:44:02Z."
+      notice_id: "NOTICE-PA-20260418-003302"
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    Adverse action notices (ADVERSE_ACTION) have strict state and federal
+    timing requirements (typically 10–30 days advance notice before action
+    takes effect). Your service must respect the response_deadline and
+    track timeliness compliance in your audit log.
+  - >
+    All outbound notices must comply with plain language standards (federal
+    Plain Writing Act) and applicable state language access requirements.
+    If the applicant's preferred language is known, deliver in that language.
+    Use the language_code field to specify — your service should support at
+    minimum English and Spanish.
+  - >
+    For inbound responses, the platform will resume any paused workflows
+    (e.g., RFI timers) once you return status "received". The applicant_reference
+    in content must link to a valid outbound notice_id for the platform to
+    correctly close the RFI loop.
+  - >
+    Notice records are part of the permanent case file and may be subpoenaed
+    or reviewed in appeals. Retain all notice content, delivery metadata,
+    and read receipts for at least 7 years.
+  - >
+    When delivery_channels includes "mail", physical mail batches may not be
+    same-day. Return status "sent" once the mail job is confirmed queued,
+    and note the estimated delivery date in message.
+  - >
+    For template_id usage: your service's template library must be approved by
+    the state DPW legal/policy team before use in production. Templates are
+    not validated by the DPW platform — template compliance is your responsibility.

@@ -1,0 +1,255 @@
+# =============================================================================
+# DPW Open Platform — Layer 02: Application
+# =============================================================================
+#
+# PURPOSE
+#   This layer receives and processes benefit applications submitted by or on
+#   behalf of an applicant. A 3rd party implementing this layer acts as the
+#   application intake system — accepting application data, persisting it,
+#   and returning a confirmation that the platform uses to advance the case.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 2
+  name: application
+  description: >
+    Application intake layer. Accepts structured application data for one or
+    more benefit programs and returns a stable application_id and confirmation
+    number that the platform uses for all downstream layer coordination.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform when submitting an application on behalf
+    of an applicant. The application_data object is intentionally flexible to
+    accommodate state-specific form fields — your service must define and
+    document which fields it expects within that object.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - applicant_identifier
+      - program_codes
+      - application_data
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+          Treat as an opaque string; do not parse internal structure.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code identifying the administering
+          jurisdiction. Used to select state-specific validation rules.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 2 for
+          this contract. Validated by the platform before dispatch.
+        enum: [2]
+        example: 2
+
+      # --- Layer-specific fields ---
+
+      applicant_identifier:
+        type: string
+        description: >
+          Opaque platform-issued handle identifying the applicant. Use the
+          DPW Identity Resolution API to resolve contact or demographic
+          details; do not expect PII in this field.
+        example: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
+
+      program_codes:
+        type: array
+        description: >
+          The DPW program codes this application covers. A single application
+          may span multiple programs (combined application). Your service
+          must handle each program code in the list.
+        items:
+          type: string
+        minItems: 1
+        example:
+          - "SNAP"
+          - "MEDICAID"
+
+      application_data:
+        type: object
+        description: >
+          Flexible JSON object containing the applicant's form responses.
+          The structure is state- and program-specific. Your service
+          registration must document the fields it expects and which are
+          required. The platform passes this object through without
+          validation — field validation is the implementor's responsibility.
+        additionalProperties: true
+        example:
+          household_size: 3
+          monthly_income_usd: 2100
+          assets_usd: 800
+          address:
+            street: "123 Maple St"
+            city: "Philadelphia"
+            zip: "19103"
+          self_attested_citizenship: true
+          signature_token: "sig-a1b2c3d4"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 2
+    applicant_identifier: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
+    program_codes:
+      - "SNAP"
+      - "MEDICAID"
+    application_data:
+      household_size: 3
+      monthly_income_usd: 2100
+      assets_usd: 800
+      address:
+        street: "123 Maple St"
+        city: "Philadelphia"
+        zip: "19103"
+      self_attested_citizenship: true
+      signature_token: "sig-a1b2c3d4"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. The application_id and confirmation_number are the primary
+    identifiers used by downstream layers (case initiation, verification, etc.)
+    to reference this application. They must be stable and retrievable after
+    the fact.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - application_id
+      - confirmation_number
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request. Required for platform
+          correlation.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Outcome of the application intake attempt.
+            submitted — Application persisted; confirmation_number is valid.
+            draft     — Application saved as incomplete; further input needed.
+            error     — Application could not be persisted; see message.
+        enum:
+          - submitted
+          - draft
+          - error
+        example: "submitted"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the outcome. For errors, include
+          enough detail for a caseworker to understand the failure mode.
+        example: "Application submitted successfully for programs: SNAP, MEDICAID."
+
+      # --- Layer-specific response fields ---
+
+      application_id:
+        type: string
+        description: >
+          Stable, globally unique identifier for this application record within
+          your system. The platform will pass this to downstream layers.
+          Must be non-empty on status "submitted" and "draft".
+          May be empty string on status "error".
+        example: "APP-PA-20260418-009921"
+
+      confirmation_number:
+        type: string
+        description: >
+          Human-readable confirmation number suitable for providing to the
+          applicant. Should be easy to read aloud (avoid ambiguous characters
+          like 0/O, 1/I/l). Must be non-empty on status "submitted".
+          May be empty string on status "draft" or "error".
+        example: "PA-SNAP-2026-44821"
+
+  examples:
+    submitted:
+      case_id: "CASE-2026-PA-00041872"
+      status: "submitted"
+      message: "Application submitted successfully for programs: SNAP, MEDICAID."
+      application_id: "APP-PA-20260418-009921"
+      confirmation_number: "PA-SNAP-2026-44821"
+
+    draft:
+      case_id: "CASE-2026-PA-00041873"
+      status: "draft"
+      message: "Application saved as draft; household income information is incomplete."
+      application_id: "APP-PA-20260418-009922"
+      confirmation_number: ""
+
+    error:
+      case_id: "CASE-2026-PA-00041874"
+      status: "error"
+      message: "Application could not be saved: signature_token failed validation."
+      application_id: ""
+      confirmation_number: ""
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    The application_id you return will be stored by the DPW platform and
+    passed as a field in the Layer 03 (Case Initiation) request. Ensure it
+    is durable and retrievable for at least 7 years to meet federal record
+    retention requirements.
+  - >
+    For status "draft", the platform may re-invoke this endpoint with updated
+    application_data. Your service should treat duplicate case_id + application_id
+    combinations as an update, not a new record.
+  - >
+    Do not reject requests due to unknown fields in application_data. States
+    may include additional fields for local programs — pass through and store
+    any extra fields.
+  - >
+    The confirmation_number should be communicated to the applicant by the
+    calling system or via Layer 08 (Notice/RFI). Your service does not need
+    to deliver it directly.
+  - >
+    Idempotency: if you receive the same case_id twice with identical
+    application_data, return the same application_id and confirmation_number
+    without creating a duplicate record.

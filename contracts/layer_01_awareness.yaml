@@ -1,0 +1,232 @@
+# =============================================================================
+# DPW Open Platform — Layer 01: Awareness
+# =============================================================================
+#
+# PURPOSE
+#   This layer handles outreach and notification to applicants about available
+#   benefit programs. A registered 3rd party app implementing this layer is
+#   responsible for delivering program awareness messages via the specified
+#   channel (SMS, email, portal, or physical mail).
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 1
+  name: awareness
+  description: >
+    Outreach and notification layer. Delivers program awareness messages to
+    prospective applicants through their preferred or available channel.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform when requesting that a 3rd party awareness
+    service contact an applicant about one or more benefit programs.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - applicant_identifier
+      - channel
+      - program_codes
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+          Treat as an opaque string; do not parse internal structure.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code identifying the administering
+          jurisdiction (e.g., "PA" for Pennsylvania, "CA" for California).
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 1 for
+          this contract. Validated by the platform before dispatch.
+        enum: [1]
+        example: 1
+
+      # --- Layer-specific fields ---
+
+      applicant_identifier:
+        type: string
+        description: >
+          Opaque token identifying the applicant within the DPW platform.
+          Do NOT store or log this value alongside PII — it is a reference
+          handle, not a social security number or government ID.
+        example: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
+
+      channel:
+        type: string
+        description: >
+          The delivery channel to use for this awareness communication.
+          Your implementation is only required to support the channels
+          declared in your service registration.
+        enum:
+          - sms
+          - email
+          - portal
+          - mail
+        example: "email"
+
+      program_codes:
+        type: array
+        description: >
+          One or more DPW program codes for which the applicant should be
+          made aware. Your service should include relevant details for each
+          program in the outreach message.
+        items:
+          type: string
+        minItems: 1
+        example:
+          - "SNAP"
+          - "MEDICAID"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 1
+    applicant_identifier: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
+    channel: "email"
+    program_codes:
+      - "SNAP"
+      - "MEDICAID"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests — including delivery failures. Use HTTP 4xx/5xx only for
+    transport-level or authentication errors, not business-logic outcomes.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request. The platform uses this to
+          correlate responses with in-flight cases.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Outcome of the awareness delivery attempt.
+            sent    — Message was successfully delivered to the channel.
+            failed  — Delivery failed; see message for details.
+            queued  — Message accepted but deferred (e.g., mail batch).
+        enum:
+          - sent
+          - failed
+          - queued
+        example: "sent"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the outcome. Include enough detail for
+          a caseworker to understand what happened without reading logs.
+        example: "Awareness email delivered to applicant for programs: SNAP, MEDICAID."
+
+      # --- Layer-specific response fields ---
+
+      delivery_details:
+        type: object
+        description: >
+          Optional additional metadata about the delivery. Useful for
+          audit trails and caseworker visibility. Structure is flexible
+          but should be serializable JSON.
+        required: false
+        additionalProperties: true
+        example:
+          channel_used: "email"
+          timestamp_utc: "2026-04-18T14:32:00Z"
+          message_id: "msg-20260418-email-00289"
+          recipient_masked: "a***@example.com"
+
+  examples:
+    success:
+      case_id: "CASE-2026-PA-00041872"
+      status: "sent"
+      message: "Awareness email delivered to applicant for programs: SNAP, MEDICAID."
+      delivery_details:
+        channel_used: "email"
+        timestamp_utc: "2026-04-18T14:32:00Z"
+        message_id: "msg-20260418-email-00289"
+        recipient_masked: "a***@example.com"
+
+    queued:
+      case_id: "CASE-2026-PA-00041873"
+      status: "queued"
+      message: "Physical mail queued for next batch processing on 2026-04-19."
+      delivery_details:
+        channel_used: "mail"
+        batch_id: "BATCH-2026-04-19-AM"
+        estimated_delivery: "2026-04-23"
+
+    failed:
+      case_id: "CASE-2026-PA-00041874"
+      status: "failed"
+      message: "SMS delivery failed: invalid or unsubscribed phone number on record."
+      delivery_details:
+        channel_used: "sms"
+        error_code: "INVALID_NUMBER"
+        timestamp_utc: "2026-04-18T14:33:01Z"
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    Your POST /invoke endpoint must respond within the platform SLA (default:
+    30 seconds). For async channels like mail, return status "queued"
+    immediately and handle batch delivery out-of-band.
+  - >
+    Do not include raw PII (SSN, DOB, full name) in delivery_details.
+    Mask or omit sensitive values as shown in the examples above.
+  - >
+    The applicant_identifier is a platform-issued handle. Your service must
+    resolve it to a contact address using the DPW Identity Resolution API
+    before attempting delivery.
+  - >
+    If you cannot resolve the applicant_identifier to a valid contact for
+    the requested channel, return status "failed" with a descriptive message.
+  - >
+    Program codes follow the DPW Program Registry. Your service should
+    gracefully handle unknown codes by noting them in delivery_details rather
+    than hard-failing the entire request.

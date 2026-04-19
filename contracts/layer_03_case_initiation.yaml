@@ -1,0 +1,211 @@
+# =============================================================================
+# DPW Open Platform — Layer 03: Case Initiation
+# =============================================================================
+#
+# PURPOSE
+#   This layer formally opens a case in the state's case management system
+#   after an application has been submitted (Layer 02). A 3rd party
+#   implementing this layer creates the case record, performs duplicate
+#   detection, and optionally assigns a caseworker.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 3
+  name: case_initiation
+  description: >
+    Case management intake layer. Creates a formal case record in the state
+    system, runs duplicate detection, and optionally assigns a caseworker.
+    Downstream layers (verification, eligibility, etc.) reference the case_id
+    established here.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform after a successful application submission.
+    The application_id links this case to the Layer 02 application record.
+    If your system supports automated worker assignment, use the worker_id
+    field to override the assignment logic.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - application_id
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+          This is the canonical ID used across all layers — your case management
+          system should index on this value.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code. Used to select state-specific
+          case routing and duplicate-detection rules.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 3 for
+          this contract.
+        enum: [3]
+        example: 3
+
+      # --- Layer-specific fields ---
+
+      application_id:
+        type: string
+        description: >
+          The application_id returned by the Layer 02 (Application) service.
+          Use this to retrieve full application details from the intake system
+          if your case management system needs them.
+        example: "APP-PA-20260418-009921"
+
+      worker_id:
+        type: string
+        description: >
+          Optional. If provided, assign this specific caseworker to the case
+          rather than using automated assignment logic. Useful for transfers,
+          test cases, and supervisor overrides.
+        required: false
+        example: "WORKER-PA-00472"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 3
+    application_id: "APP-PA-20260418-009921"
+    worker_id: "WORKER-PA-00472"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. On status "duplicate", the platform will halt further processing
+    and flag the case for manual review — provide enough context in message
+    to support that review.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Outcome of the case initiation attempt.
+            initiated — Case record created successfully.
+            duplicate — A matching case already exists; see message for details.
+            error     — Case could not be created; see message for details.
+        enum:
+          - initiated
+          - duplicate
+          - error
+        example: "initiated"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the outcome. For "duplicate", include the
+          existing case reference if available. For "error", describe what
+          failed.
+        example: "Case initiated and assigned to worker WORKER-PA-00472."
+
+      # --- Layer-specific response fields ---
+
+      assigned_worker_id:
+        type: string
+        description: >
+          The worker ID assigned to this case. May differ from the requested
+          worker_id if automated assignment overrides were applied.
+          Omit or set null if no worker is assigned (e.g., on error or
+          when worker pools are used instead of direct assignment).
+        required: false
+        example: "WORKER-PA-00472"
+
+  examples:
+    initiated_with_assignment:
+      case_id: "CASE-2026-PA-00041872"
+      status: "initiated"
+      message: "Case initiated and assigned to worker WORKER-PA-00472."
+      assigned_worker_id: "WORKER-PA-00472"
+
+    initiated_auto_assigned:
+      case_id: "CASE-2026-PA-00041873"
+      status: "initiated"
+      message: "Case initiated. Auto-assigned to worker WORKER-PA-00108 based on caseload balancing."
+      assigned_worker_id: "WORKER-PA-00108"
+
+    duplicate:
+      case_id: "CASE-2026-PA-00041874"
+      status: "duplicate"
+      message: >
+        Duplicate detected: applicant already has an active case under
+        CASE-2026-PA-00039001. New case halted pending manual review.
+
+    error:
+      case_id: "CASE-2026-PA-00041875"
+      status: "error"
+      message: "Case initiation failed: application_id APP-PA-20260418-009923 not found in intake system."
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    Duplicate detection logic is your responsibility. At minimum, check for
+    active cases with the same applicant_identifier and overlapping program
+    codes within the same state_code. Define "active" according to your
+    state's policy.
+  - >
+    On status "duplicate", the DPW platform will NOT invoke downstream layers
+    automatically. The existing case continues on its own track. A caseworker
+    may manually merge or dismiss the duplicate via the platform UI.
+  - >
+    If worker_id is provided but the worker does not exist or is unavailable
+    (on leave, inactive), you may auto-assign and note the override in message.
+    Do not return "error" solely because the requested worker is unavailable.
+  - >
+    The assigned_worker_id should be a stable identifier that can be passed
+    to Layer 04 (Exception Handling) and Layer 08 (Notice/RFI) for routing
+    worker-addressed communications.
+  - >
+    Idempotency: if the same case_id is received again with status "initiated"
+    already on record, return "initiated" with the existing worker assignment
+    rather than creating a second case record.

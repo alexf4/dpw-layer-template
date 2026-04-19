@@ -1,0 +1,280 @@
+# =============================================================================
+# DPW Open Platform — Layer 10: Benefit Distribution
+# =============================================================================
+#
+# PURPOSE
+#   This layer schedules and executes the delivery of approved benefits to
+#   enrolled participants. A 3rd party implementing this layer acts as the
+#   benefit issuance system — interfacing with EBT processors, EFT networks,
+#   check printers, or voucher management systems to deliver the right benefit
+#   amount through the right channel at the right time.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 10
+  name: benefit_distribution
+  description: >
+    Benefit issuance and distribution layer. Receives enrollment details for
+    an approved program and schedules or executes benefit delivery via the
+    specified distribution method. Supports EFT (direct deposit), EBT
+    (electronic benefit transfer card), check, and voucher distribution.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform after a successful eligibility
+    determination (Layer 09). One request per program per enrollment period.
+    The distribution_period defines the benefit window being authorized.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - program_code
+      - distribution_method
+      - distribution_period
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code. Determines which distribution
+          networks and processors are available.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 10 for
+          this contract.
+        enum: [10]
+        example: 10
+
+      # --- Layer-specific fields ---
+
+      program_code:
+        type: string
+        description: >
+          The DPW program code for the benefit being distributed. This is a
+          single program per request — one invocation per program per period.
+        example: "SNAP"
+
+      distribution_method:
+        type: string
+        description: >
+          The mechanism by which benefits will be delivered to the participant.
+            eft     — Electronic Funds Transfer (ACH direct deposit to a bank account).
+            ebt     — Electronic Benefit Transfer card (e.g., SNAP, cash assistance).
+            check   — Paper check mailed to the participant.
+            voucher — Program-specific paper or digital voucher (e.g., WIC, housing).
+          Your service registration must declare which methods it supports.
+          The platform selects the method based on participant preference,
+          program rules, and your declared capabilities.
+        enum:
+          - eft
+          - ebt
+          - check
+          - voucher
+        example: "ebt"
+
+      benefit_amount:
+        type: number
+        description: >
+          The monetary benefit amount to issue, in USD, for this distribution
+          period. Optional for programs where the benefit is non-monetary
+          (e.g., health insurance authorization, housing voucher unit size).
+          For EBT and EFT methods, this field is required and must be > 0.
+        minimum: 0
+        required: false
+        example: 536
+
+      distribution_period:
+        type: object
+        description: >
+          Defines the time window this benefit authorization covers. Required fields:
+            start_date  (string) — ISO8601 date benefits are effective from.
+            end_date    (string) — ISO8601 date benefits expire (last day of period).
+          Optional fields:
+            issuance_date (string) — ISO8601 date the benefit should be issued/loaded.
+                                     Defaults to start_date if omitted.
+            frequency     (string) — "monthly" | "biweekly" | "weekly" | "one_time"
+                                     Describes the recurring schedule if applicable.
+        required:
+          - start_date
+          - end_date
+        properties:
+          start_date:
+            type: string
+            format: date
+            example: "2026-05-01"
+          end_date:
+            type: string
+            format: date
+            example: "2027-04-30"
+          issuance_date:
+            type: string
+            format: date
+            example: "2026-05-01"
+          frequency:
+            type: string
+            enum: [monthly, biweekly, weekly, one_time]
+            example: "monthly"
+        example:
+          start_date: "2026-05-01"
+          end_date: "2027-04-30"
+          issuance_date: "2026-05-01"
+          frequency: "monthly"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 10
+    program_code: "SNAP"
+    distribution_method: "ebt"
+    benefit_amount: 536
+    distribution_period:
+      start_date: "2026-05-01"
+      end_date: "2027-04-30"
+      issuance_date: "2026-05-01"
+      frequency: "monthly"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. The distribution_id is the stable reference for this issuance
+    record. On "failed", the platform triggers a Layer 04 (Exception Handling)
+    escalation.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - distribution_id
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Outcome of the benefit distribution attempt.
+            scheduled — Benefit issuance has been queued for the issuance_date.
+                        Use this when the issuance_date is in the future.
+            issued    — Benefit has been loaded/transferred/mailed immediately.
+                        Use this when issuance is confirmed as executed.
+            failed    — Benefit could not be scheduled or issued. See message.
+                        Platform will trigger exception handling.
+        enum:
+          - scheduled
+          - issued
+          - failed
+        example: "scheduled"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the distribution outcome.
+        example: "SNAP EBT benefit of $536.00/month scheduled for issuance starting 2026-05-01."
+
+      # --- Layer-specific response fields ---
+
+      distribution_id:
+        type: string
+        description: >
+          Stable unique identifier for this distribution/issuance record in
+          your system. Used in audit trails, appeals (Layer 11), and
+          recertification lookups. Must be non-empty on "scheduled" and
+          "issued". May be empty string on "failed".
+        example: "DIST-SNAP-PA-20260418-004471"
+
+  examples:
+    scheduled_ebt:
+      case_id: "CASE-2026-PA-00041872"
+      status: "scheduled"
+      message: "SNAP EBT benefit of $536.00/month scheduled for issuance starting 2026-05-01."
+      distribution_id: "DIST-SNAP-PA-20260418-004471"
+
+    issued_eft:
+      case_id: "CASE-2026-PA-00041880"
+      status: "issued"
+      message: "Cash assistance of $412.00 issued via ACH EFT. Expected bank posting: 2026-04-20."
+      distribution_id: "DIST-CASH-PA-20260418-004472"
+
+    issued_check:
+      case_id: "CASE-2026-PA-00041881"
+      status: "issued"
+      message: "Check for $150.00 (General Assistance) queued for printing. Estimated delivery: 2026-04-23."
+      distribution_id: "DIST-GA-PA-20260418-004473"
+
+    failed:
+      case_id: "CASE-2026-PA-00041882"
+      status: "failed"
+      message: "EBT card issuance failed: participant has no active EBT account on file. Manual intervention required."
+      distribution_id: ""
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    One invocation = one program. If a household is enrolled in SNAP and CHIP,
+    the platform will send two separate requests. Do not combine programs in
+    a single distribution_id.
+  - >
+    For recurring benefits (frequency: "monthly"), return status "scheduled"
+    on the first invocation. Your system is responsible for recurring issuance
+    through the end_date without further platform invocations per period.
+    The platform will send a new request at recertification time.
+  - >
+    For EBT distribution: you are responsible for interfacing with the state's
+    EBT processor (e.g., FIS, Conduent). The DPW platform does not have
+    direct EBT network access.
+  - >
+    For EFT distribution: ACH transactions must comply with NACHA rules.
+    If the participant's bank account information is invalid or closed, return
+    status "failed" — this triggers Layer 04 exception handling to arrange
+    an alternative distribution method.
+  - >
+    Benefit amounts are in USD. For programs with non-USD benefit units (e.g.,
+    WIC food package, housing voucher bedroom size), represent the benefit
+    in the voucher field of a program-specific extension object within
+    distribution_period, and set benefit_amount to null or 0.
+  - >
+    The distribution_id will be referenced in Layer 11 (Appeals) if the
+    participant disputes a benefit amount or issuance. Ensure your system
+    can retrieve issuance records by distribution_id.

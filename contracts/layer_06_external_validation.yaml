@@ -1,0 +1,306 @@
+# =============================================================================
+# DPW Open Platform — Layer 06: External Validation
+# =============================================================================
+#
+# PURPOSE
+#   This layer queries external government and third-party data sources to
+#   cross-validate specific data points in a case. Unlike Layer 05
+#   (Verification), which confirms claimed identity and eligibility factors,
+#   this layer is used for targeted lookups — checking a specific value
+#   against a specific external source as directed by the platform or a
+#   caseworker rule.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 6
+  name: external_validation
+  description: >
+    Targeted external data validation layer. Executes structured queries
+    against named external data sources and returns per-source validation
+    results. Used for cross-checking specific case data points (e.g.,
+    address against USPS, property ownership against county records,
+    incarceration status against DOC feeds).
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform specifying which external data sources
+    to query and what to look up in each. The validation_queries object
+    is a map from data source name to a source-specific query object.
+    Your service registration must document the sources it supports and
+    the query schema each source expects.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - data_sources
+      - validation_queries
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code. Some data sources are
+          state-specific (e.g., state property records, state DOC feeds).
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 6 for
+          this contract.
+        enum: [6]
+        example: 6
+
+      # --- Layer-specific fields ---
+
+      data_sources:
+        type: array
+        description: >
+          List of external data source identifiers to query. These must match
+          the source names registered in your service's capability declaration.
+          The platform uses this list to verify your service can handle the
+          request before dispatching. Common examples:
+            USPS_AV        — USPS Address Validation API
+            SSA_DEATH      — SSA Death Master File
+            HUD_DEROG      — HUD Derogatory Records
+            COUNTY_PROP    — County property/deed records (state-specific)
+            STATE_DOC      — State Department of Corrections inmate feed
+            NDNH           — National Directory of New Hires (wage/employment)
+        items:
+          type: string
+        minItems: 1
+        example:
+          - "USPS_AV"
+          - "HUD_DEROG"
+
+      validation_queries:
+        type: object
+        description: >
+          A map from data source name to a source-specific query object.
+          Each key must appear in data_sources. The query object's structure
+          is defined by the data source — see your service's documentation
+          for each supported source. Unknown keys should be ignored by the
+          platform but flagged in validation_results.
+        additionalProperties:
+          type: object
+          additionalProperties: true
+        example:
+          USPS_AV:
+            street: "123 Maple St"
+            city: "Philadelphia"
+            state: "PA"
+            zip: "19103"
+          HUD_DEROG:
+            ssn_last4: "6789"
+            dob_year: 1985
+            last_name: "Smith"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 6
+    data_sources:
+      - "USPS_AV"
+      - "HUD_DEROG"
+    validation_queries:
+      USPS_AV:
+        street: "123 Maple St"
+        city: "Philadelphia"
+        state: "PA"
+        zip: "19103"
+      HUD_DEROG:
+        ssn_last4: "6789"
+        dob_year: 1985
+        last_name: "Smith"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. The overall status summarizes results across all queried sources.
+    Per-source results are in validation_results.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - validation_results
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Aggregate validation outcome across all queried data sources.
+            validated    — All queries returned consistent, confirming results.
+            discrepancy  — One or more queries returned data inconsistent with
+                           case data. See validation_results for detail.
+            unavailable  — One or more data sources could not be reached or
+                           returned an error. Partial results may still be present.
+        enum:
+          - validated
+          - discrepancy
+          - unavailable
+        example: "discrepancy"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the aggregate validation outcome.
+        example: "Address validated. HUD derogatory record found — case flagged for review."
+
+      # --- Layer-specific response fields ---
+
+      validation_results:
+        type: object
+        description: >
+          A map from data source name to a result object. Each key corresponds
+          to an entry in the request's data_sources list.
+          Required fields per result object:
+            status       (string) — "match" | "no_match" | "discrepancy" | "unavailable" | "error"
+            detail       (string) — Human-readable description of the result.
+          Optional fields per result object:
+            matched_data (object) — Masked or summarized data returned by the source.
+            flags        (array)  — Machine-readable flag codes for downstream rules.
+        additionalProperties:
+          type: object
+          required:
+            - status
+            - detail
+          properties:
+            status:
+              type: string
+              enum: [match, no_match, discrepancy, unavailable, error]
+            detail:
+              type: string
+            matched_data:
+              type: object
+              additionalProperties: true
+            flags:
+              type: array
+              items:
+                type: string
+        example:
+          USPS_AV:
+            status: "match"
+            detail: "Address validated and standardized by USPS."
+            matched_data:
+              standardized_address: "123 MAPLE ST, PHILADELPHIA PA 19103-2211"
+              delivery_point: "confirmed"
+          HUD_DEROG:
+            status: "discrepancy"
+            detail: "Applicant found in HUD derogatory record database. Review required before housing assistance eligibility."
+            flags:
+              - "HUD_DEROG_MATCH"
+              - "HOUSING_HOLD"
+
+  examples:
+    all_validated:
+      case_id: "CASE-2026-PA-00041880"
+      status: "validated"
+      message: "All external validation queries returned consistent results."
+      validation_results:
+        USPS_AV:
+          status: "match"
+          detail: "Address confirmed as deliverable."
+          matched_data:
+            standardized_address: "456 OAK AVE, PITTSBURGH PA 15201-3344"
+            delivery_point: "confirmed"
+        NDNH:
+          status: "match"
+          detail: "Employment status consistent with self-attestation."
+
+    discrepancy_found:
+      case_id: "CASE-2026-PA-00041872"
+      status: "discrepancy"
+      message: "Address validated. HUD derogatory record found — case flagged for review."
+      validation_results:
+        USPS_AV:
+          status: "match"
+          detail: "Address validated and standardized by USPS."
+          matched_data:
+            standardized_address: "123 MAPLE ST, PHILADELPHIA PA 19103-2211"
+            delivery_point: "confirmed"
+        HUD_DEROG:
+          status: "discrepancy"
+          detail: "Applicant found in HUD derogatory record database."
+          flags:
+            - "HUD_DEROG_MATCH"
+            - "HOUSING_HOLD"
+
+    source_unavailable:
+      case_id: "CASE-2026-PA-00041881"
+      status: "unavailable"
+      message: "COUNTY_PROP source unavailable due to maintenance window. USPS validation completed."
+      validation_results:
+        USPS_AV:
+          status: "match"
+          detail: "Address confirmed as deliverable."
+        COUNTY_PROP:
+          status: "unavailable"
+          detail: "Philadelphia county property API is in a scheduled maintenance window until 2026-04-19T06:00:00Z."
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    Your service registration must declare the complete list of data_sources
+    you support. The platform will only dispatch requests to your service if
+    all requested data_sources are in your declared capabilities.
+  - >
+    Data source credentials and data use agreements (DUAs) are the responsibility
+    of the implementing service, not the DPW platform. Ensure your service is
+    authorized to query each source it supports.
+  - >
+    If a data source is temporarily unavailable, return status "unavailable"
+    for that source rather than failing the whole request. The platform may
+    retry unavailable sources independently.
+  - >
+    Flags in validation_results.*.flags should use the standard DPW flag code
+    registry where possible. Proprietary flag codes should be namespaced
+    (e.g., "MYSERVICE_FLAG_X") to avoid collisions.
+  - >
+    Do not include raw PII from data source responses in validation_results.
+    Mask, hash, or summarize as required by each source's DUA.
+  - >
+    Discrepancy results may trigger a Layer 04 (Exception Handling) invocation.
+    The validation_results object will be passed as exception_data — structure
+    your results for clarity in that context.

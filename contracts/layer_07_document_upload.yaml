@@ -1,0 +1,278 @@
+# =============================================================================
+# DPW Open Platform — Layer 07: Document Upload
+# =============================================================================
+#
+# PURPOSE
+#   This layer manages the receipt and registration of supporting documents
+#   submitted by applicants or caseworkers (e.g., pay stubs, ID copies,
+#   lease agreements). The DPW platform does NOT handle file bytes —
+#   document storage uses pre-signed URLs. The 3rd party service receives
+#   the pre-signed upload URL and metadata, confirms the upload was completed,
+#   and registers the document for downstream use.
+#
+# IMPORTANT: PRE-SIGNED URL PATTERN
+#   File bytes are transferred directly between the applicant's client and
+#   the storage service (e.g., S3, Azure Blob) via the pre-signed URL.
+#   This service is NOT in the file transfer path. Its job is to:
+#     1. Validate the upload metadata.
+#     2. Confirm the file was uploaded to the pre-signed URL.
+#     3. Register the document in the document management system.
+#     4. Return a stable document_id for downstream reference.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 7
+  name: document_upload
+  description: >
+    Document registration layer. Receives pre-signed URL upload confirmations
+    and document metadata, validates the upload, and registers the document
+    for downstream case processing. File bytes are NOT transmitted through
+    this layer — only metadata and the pre-signed storage URL.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform after an applicant has been issued a
+    pre-signed URL and has (or should have) uploaded a file to it. Your
+    service should verify the file exists at the URL location and register
+    the document with appropriate metadata.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - document_type
+      - document_metadata
+      - upload_url
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 7 for
+          this contract.
+        enum: [7]
+        example: 7
+
+      # --- Layer-specific fields ---
+
+      document_type:
+        type: string
+        description: >
+          A code identifying the type of document being registered. Your service
+          should maintain a list of accepted document types in its service
+          registration. Common examples:
+            PAY_STUB          — Recent pay stub (income verification)
+            BANK_STATEMENT    — Bank statement (assets/income verification)
+            PHOTO_ID          — Government-issued photo ID
+            LEASE_AGREEMENT   — Current lease or rental agreement (residency)
+            UTILITY_BILL      — Utility bill (residency verification)
+            BIRTH_CERTIFICATE — Birth certificate (household/age verification)
+            SSN_CARD          — Social Security card
+            SELF_EMPLOYMENT   — Self-employment income documentation
+            OTHER             — Miscellaneous; describe in document_metadata
+        example: "PAY_STUB"
+
+      document_metadata:
+        type: object
+        description: >
+          Structured metadata about the document. Your service uses this for
+          registration, routing, and quality checks. Required fields are
+          defined by your service registration. Common fields include:
+            file_name         (string)  — Original filename as submitted.
+            file_size_bytes   (integer) — File size; use to verify upload completeness.
+            mime_type         (string)  — MIME type (e.g., "application/pdf", "image/jpeg").
+            uploaded_by       (string)  — "applicant" | "caseworker" | "system"
+            description       (string)  — Free-text description (optional).
+            document_date     (string)  — ISO8601 date the document was issued or dated.
+            issuing_authority (string)  — Entity that issued the document (optional).
+        additionalProperties: true
+        example:
+          file_name: "pay_stub_april_2026.pdf"
+          file_size_bytes: 204800
+          mime_type: "application/pdf"
+          uploaded_by: "applicant"
+          description: "Most recent pay stub from Acme Corp, pay period ending 2026-04-15"
+          document_date: "2026-04-15"
+          issuing_authority: "Acme Corp"
+
+      upload_url:
+        type: string
+        description: >
+          The pre-signed URL where the file was (or should be) uploaded.
+          This is a time-limited, capability-bearing URL pointing to the
+          cloud storage location of the document. Your service should
+          perform a HEAD or GET request to this URL to confirm the file
+          is present and matches the declared file_size_bytes before
+          registering the document.
+          NOTE: Pre-signed URLs expire. The platform ensures this request
+          is dispatched before expiry — if the URL has expired when you
+          receive the request, return status "rejected" with an appropriate
+          message.
+        format: uri
+        example: "https://dpw-documents-pa.s3.amazonaws.com/uploads/CASE-2026-PA-00041872/pay_stub_april_2026.pdf?X-Amz-Signature=abc123&X-Amz-Expires=3600"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 7
+    document_type: "PAY_STUB"
+    upload_url: "https://dpw-documents-pa.s3.amazonaws.com/uploads/CASE-2026-PA-00041872/pay_stub_april_2026.pdf?X-Amz-Signature=abc123&X-Amz-Expires=3600"
+    document_metadata:
+      file_name: "pay_stub_april_2026.pdf"
+      file_size_bytes: 204800
+      mime_type: "application/pdf"
+      uploaded_by: "applicant"
+      description: "Most recent pay stub from Acme Corp, pay period ending 2026-04-15"
+      document_date: "2026-04-15"
+      issuing_authority: "Acme Corp"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. On "received", the document_id is the stable reference used
+    by all downstream layers. On "rejected", the platform will notify the
+    applicant via Layer 08 (Notice/RFI) requesting a replacement document.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - document_id
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Outcome of the document registration attempt.
+            received        — Document confirmed at storage location and registered.
+            rejected        — Document failed validation (bad format, expired URL,
+                              file size mismatch, quality check failure, etc.).
+            pending_review  — Document received but requires manual caseworker
+                              review before it can be used downstream (e.g.,
+                              document type requires human verification).
+        enum:
+          - received
+          - rejected
+          - pending_review
+        example: "received"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the outcome. For "rejected", include
+          enough detail for the applicant to understand what to resubmit.
+        example: "Pay stub received and registered. Document ID: DOC-PA-20260418-007741."
+
+      # --- Layer-specific response fields ---
+
+      document_id:
+        type: string
+        description: >
+          Stable unique identifier for this document in your document management
+          system. The platform uses this in downstream layers to reference the
+          document (e.g., in eligibility determination, notices, and appeals).
+          Must be non-empty on status "received" and "pending_review".
+          May be empty string on "rejected" if registration was not completed.
+        example: "DOC-PA-20260418-007741"
+
+  examples:
+    received:
+      case_id: "CASE-2026-PA-00041872"
+      status: "received"
+      message: "Pay stub received and registered. Document ID: DOC-PA-20260418-007741."
+      document_id: "DOC-PA-20260418-007741"
+
+    pending_review:
+      case_id: "CASE-2026-PA-00041873"
+      status: "pending_review"
+      message: "Photo ID received but requires caseworker review before use in eligibility determination."
+      document_id: "DOC-PA-20260418-007742"
+
+    rejected_expired_url:
+      case_id: "CASE-2026-PA-00041874"
+      status: "rejected"
+      message: "Pre-signed URL has expired. Applicant must re-upload the document."
+      document_id: ""
+
+    rejected_quality:
+      case_id: "CASE-2026-PA-00041875"
+      status: "rejected"
+      message: "Document rejected: file appears to be a photo of a screen (glare detected). Please submit a flat scan or direct PDF export."
+      document_id: ""
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    This layer operates on pre-signed URLs — your service should perform a
+    HEAD request to confirm the file exists and matches the declared
+    file_size_bytes before registering. Do not proceed with registration if
+    the file is absent or the size is mismatched.
+  - >
+    The DPW platform does NOT store document bytes. Your document management
+    system is the authoritative store. Ensure documents are retained for the
+    minimum period required by federal and state record retention rules
+    (typically 5–7 years for benefit programs).
+  - >
+    For status "rejected", the platform will automatically trigger a Layer 08
+    (Notice/RFI) outbound request to the applicant asking them to resubmit.
+    Your rejection message will be included in that notice — write it for
+    an applicant audience, not a technical audience.
+  - >
+    For status "pending_review", downstream layers will be paused until the
+    document transitions to "received" (via caseworker action in your system).
+    Your service must expose a webhook or callback mechanism to notify the
+    platform when the manual review is complete.
+  - >
+    Accepted MIME types should be declared in your service registration.
+    At minimum, support "application/pdf". Common additions: "image/jpeg",
+    "image/png", "image/tiff".
+  - >
+    The upload_url pre-signed signature grants read access only. Your service
+    must not write to or modify the file at the storage location — only
+    read it for validation purposes.

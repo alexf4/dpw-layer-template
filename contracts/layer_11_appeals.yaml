@@ -1,0 +1,359 @@
+# =============================================================================
+# DPW Open Platform — Layer 11: Appeals
+# =============================================================================
+#
+# PURPOSE
+#   This layer manages the formal appeals process when a participant contests
+#   an agency action — including denials, benefit reductions, or terminations.
+#   A 3rd party implementing this layer acts as the appeals management system:
+#   receiving appeal filings, scheduling hearings, conducting or recording
+#   decisions, and returning outcomes.
+#
+# CRITICAL: OVERTURNED STATUS TRIGGERS RE-ROUTING
+#   When an appeal is overturned, the DPW platform automatically re-routes
+#   case processing back to the layer identified by appealed_layer_id in the
+#   response. For example, if a SNAP denial (Layer 09) is overturned, the
+#   platform will re-invoke Layer 09 with updated determination_data. Your
+#   service MUST echo back the appealed_layer_id from the request so the
+#   platform knows where to re-enter the pipeline.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 11
+  name: appeals
+  description: >
+    Appeals management layer. Receives formal appeal filings from participants
+    contesting denials, reductions, or terminations of benefits. Manages
+    hearing scheduling, adjudication, and decision recording. On "overturned"
+    decisions, the platform re-routes case processing back to the appealed
+    layer for a fresh determination.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform when a participant files a formal appeal.
+    The appealed_layer_id identifies which layer's action is being challenged.
+    supporting_data carries any documentation or data the participant submitted
+    in support of their appeal.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - appeal_type
+      - appealed_layer_id
+      - appeal_grounds
+      - supporting_data
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for this case within the DPW platform.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code. Determines applicable hearing
+          rules, timelines, and adjudication authority.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 11 for
+          this contract.
+        enum: [11]
+        example: 11
+
+      # --- Layer-specific fields ---
+
+      appeal_type:
+        type: string
+        description: >
+          The category of agency action being appealed.
+            denial      — Participant was denied benefits entirely.
+            reduction   — Participant's benefit amount was reduced.
+            termination — Participant's existing benefits were terminated.
+        enum:
+          - denial
+          - reduction
+          - termination
+        example: "denial"
+
+      appealed_layer_id:
+        type: integer
+        description: >
+          The layer_id of the layer whose output is being appealed. This tells
+          the platform which step to re-run if the appeal is overturned.
+          Common values:
+            9  — Appealing an eligibility determination (Layer 09).
+            10 — Appealing a benefit amount or distribution action (Layer 10).
+            6  — Appealing an external validation result (Layer 06).
+            5  — Appealing a verification outcome (Layer 05).
+          Must be between 1 and 10 (cannot appeal the appeals layer itself).
+        minimum: 1
+        maximum: 10
+        example: 9
+
+      appeal_grounds:
+        type: string
+        description: >
+          The participant's stated reason(s) for the appeal, in plain language.
+          This is typically transcribed from the appeal form or portal submission.
+          Include as much detail as the participant provided — this is part of
+          the permanent case record.
+        example: >
+          My SNAP application was denied because of the income reported by IRS,
+          but that income was from a one-time 401k withdrawal that has already
+          been spent. My current monthly income is only $1,800 and I cannot
+          afford groceries for my children. I am requesting a fair hearing.
+
+      supporting_data:
+        type: object
+        description: >
+          Structured data and references supporting the appeal. May include
+          references to documents previously uploaded via Layer 07 and any
+          additional context. Common fields:
+            document_ids   (array)  — List of document_ids (Layer 07) the
+                                      participant is submitting as evidence.
+            distribution_id (string) — Relevant Layer 10 distribution_id if
+                                       appealing a specific issuance.
+            additional_context (string) — Free-text additional context.
+            contacts       (array)  — Authorized representatives or legal aid
+                                       contacts the participant has designated.
+        additionalProperties: true
+        example:
+          document_ids:
+            - "DOC-PA-20260418-007741"
+            - "DOC-PA-20260420-007799"
+          additional_context: >
+            The IRS income discrepancy is from a one-time 401k early withdrawal.
+            Attached bank statements and 1099-R form confirm the withdrawal
+            was used to pay medical bills and is not ongoing income.
+          contacts:
+            - name: "Community Legal Services"
+              phone: "215-981-3700"
+              role: "legal_representative"
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 11
+    appeal_type: "denial"
+    appealed_layer_id: 9
+    appeal_grounds: >
+      My SNAP application was denied because of income reported by IRS, but that
+      income was a one-time 401k withdrawal. My current monthly income is $1,800.
+      I am requesting a fair hearing.
+    supporting_data:
+      document_ids:
+        - "DOC-PA-20260418-007741"
+        - "DOC-PA-20260420-007799"
+      additional_context: >
+        Attached: bank statements and 1099-R confirming the withdrawal was
+        a non-recurring medical expense, not ongoing income.
+      contacts:
+        - name: "Community Legal Services"
+          phone: "215-981-3700"
+          role: "legal_representative"
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. The appeal_id is the permanent record identifier. The
+    appealed_layer_id MUST be echoed back — the platform uses this value
+    (in combination with status "overturned") to re-route case processing.
+    See the CRITICAL note at the top of this file.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - appeal_id
+      - appealed_layer_id
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Current status of the appeal.
+            filed        — Appeal received and formally docketed.
+            under_review — Appeal is being reviewed or hearing is scheduled/in progress.
+            upheld       — Agency action was upheld; original determination stands.
+            overturned   — Agency action was overturned; platform will re-route
+                           case processing to appealed_layer_id.
+            withdrawn    — Participant withdrew the appeal before a decision.
+
+          IMPORTANT: When status is "overturned", the DPW platform will
+          automatically re-invoke the layer identified by appealed_layer_id
+          with updated case data. Your service must ensure this status is
+          only returned after a formal adjudication decision.
+        enum:
+          - filed
+          - under_review
+          - upheld
+          - overturned
+          - withdrawn
+        example: "filed"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the appeal status for caseworker
+          and participant visibility.
+        example: "Appeal filed. Hearing scheduled for 2026-05-10. Benefits continue pending hearing outcome."
+
+      # --- Layer-specific response fields ---
+
+      appeal_id:
+        type: string
+        description: >
+          Stable unique identifier for this appeal record in your system.
+          The platform uses this to poll for status updates and to link
+          the appeal to the distribution_id or determination being contested.
+          Must be non-empty on all status values.
+        example: "APPEAL-PA-20260418-000881"
+
+      hearing_date:
+        type: string
+        description: >
+          ISO8601 datetime of the scheduled hearing, if applicable. Required
+          when a fair hearing has been scheduled. Omit or set null if no
+          hearing has been scheduled yet (e.g., on initial "filed" status
+          before scheduling is complete) or if the appeal was resolved
+          without a hearing.
+        format: date-time
+        required: false
+        example: "2026-05-10T10:00:00-05:00"
+
+      appealed_layer_id:
+        type: integer
+        description: >
+          Echo back the appealed_layer_id from the request. This field is
+          critical for the platform's re-routing logic. When status is
+          "overturned", the platform re-invokes this layer number with
+          refreshed case data. MUST always match the value from the request.
+        minimum: 1
+        maximum: 10
+        example: 9
+
+  examples:
+    filed:
+      case_id: "CASE-2026-PA-00041872"
+      status: "filed"
+      message: "Appeal filed and docketed. Hearing to be scheduled within 10 business days. Benefits continue during appeal period."
+      appeal_id: "APPEAL-PA-20260418-000881"
+      hearing_date: null
+      appealed_layer_id: 9
+
+    under_review_with_hearing:
+      case_id: "CASE-2026-PA-00041872"
+      status: "under_review"
+      message: "Fair hearing scheduled for 2026-05-10 at 10:00 AM Eastern. Participant notified by mail and portal."
+      appeal_id: "APPEAL-PA-20260418-000881"
+      hearing_date: "2026-05-10T10:00:00-05:00"
+      appealed_layer_id: 9
+
+    overturned:
+      case_id: "CASE-2026-PA-00041872"
+      status: "overturned"
+      message: >
+        Appeal GRANTED. Hearing officer determined IRS-reported income was
+        non-recurring (one-time 401k withdrawal) and should be excluded from
+        SNAP income calculation. Layer 09 will be re-invoked with corrected
+        income data. Benefits to be issued retroactively to original
+        application date.
+      appeal_id: "APPEAL-PA-20260418-000881"
+      hearing_date: "2026-05-10T10:00:00-05:00"
+      appealed_layer_id: 9
+
+    upheld:
+      case_id: "CASE-2026-PA-00041882"
+      status: "upheld"
+      message: >
+        Appeal DENIED. Hearing officer upheld the eligibility determination.
+        Household income, including all reported sources, exceeds program
+        limits. Participant may reapply if circumstances change.
+      appeal_id: "APPEAL-PA-20260418-000882"
+      hearing_date: "2026-05-11T14:00:00-05:00"
+      appealed_layer_id: 9
+
+    withdrawn:
+      case_id: "CASE-2026-PA-00041883"
+      status: "withdrawn"
+      message: "Participant withdrew appeal on 2026-05-08 prior to scheduled hearing."
+      appeal_id: "APPEAL-PA-20260418-000883"
+      hearing_date: null
+      appealed_layer_id: 10
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    RE-ROUTING ON "OVERTURNED": When you return status "overturned", the DPW
+    platform will re-invoke the layer at appealed_layer_id. Your service does
+    not need to trigger this — the platform handles re-routing automatically.
+    You only need to ensure appealed_layer_id is echoed correctly.
+  - >
+    Benefits must continue during the appeal period for participants with
+    currently active cases (this is a federal requirement for most programs).
+    Your service should coordinate with Layer 10 to maintain issuance while
+    status is "filed" or "under_review".
+  - >
+    Hearing scheduling must comply with state-specific timelines. Most states
+    require a hearing to be offered within 30–45 days of the appeal filing.
+    Your service is responsible for tracking and enforcing these deadlines.
+  - >
+    The platform may poll this layer (by sending a new request with the same
+    case_id) to check for status progression (e.g., from "filed" to
+    "under_review" to a final decision). Implement idempotent handling:
+    if an appeal is already on record for a case_id, return the current
+    status and existing appeal_id rather than creating a duplicate record.
+  - >
+    All hearing decisions must be captured in your system with the hearing
+    officer's name, the basis for the decision, and the specific policy
+    citations applied. This information may be subpoenaed and is not passed
+    through this contract — retain it in your system.
+  - >
+    For "withdrawn" status: participants may withdraw an appeal at any time
+    before a final decision. Withdrawn appeals should be recorded and closed
+    in your system. The platform will not re-route on a withdrawal.
+  - >
+    If the appeal contests a Layer 10 action (distribution_id mismatch,
+    wrong amount issued), set appealed_layer_id to 10. The platform will
+    re-invoke Layer 10 with the corrected benefit_amount after an overturned
+    decision.

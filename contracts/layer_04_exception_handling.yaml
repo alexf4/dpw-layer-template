@@ -1,0 +1,247 @@
+# =============================================================================
+# DPW Open Platform — Layer 04: Exception Handling
+# =============================================================================
+#
+# PURPOSE
+#   This layer receives exceptions raised by any other layer in the pipeline
+#   and routes them for resolution. Exceptions may originate from integration
+#   failures, data quality issues, policy conflicts, or manual caseworker
+#   flags. A 3rd party implementing this layer acts as the exception triage
+#   and resolution engine.
+#
+# INTEGRATION PATTERN
+#   The DPW platform will POST to your registered /invoke endpoint.
+#   Your service must return the response body described below.
+#
+# CONTRACT VERSION
+#   version: "1.0"
+#
+# =============================================================================
+
+version: "1.0"
+
+layer:
+  id: 4
+  name: exception_handling
+  description: >
+    Cross-cutting exception triage layer. Receives structured exceptions from
+    any other layer, applies resolution logic (auto-resolve, escalate, or
+    defer), and returns a disposition that the platform uses to resume or
+    halt case processing.
+
+# -----------------------------------------------------------------------------
+# REQUEST SCHEMA
+# Posted by the DPW platform to: POST /invoke
+# -----------------------------------------------------------------------------
+request:
+  description: >
+    Payload sent by the DPW platform when an exception is raised during case
+    processing. The source_layer_id identifies where the exception originated.
+    The exception_data object carries structured context about the failure —
+    its schema is defined by the originating layer's implementation.
+  schema:
+    type: object
+    required:
+      - case_id
+      - state_code
+      - layer_id
+      - exception_type
+      - exception_data
+      - source_layer_id
+    properties:
+
+      # --- Standard fields (required on every DPW layer request) ---
+
+      case_id:
+        type: string
+        description: >
+          Globally unique identifier for the case in which the exception
+          occurred.
+        example: "CASE-2026-PA-00041872"
+
+      state_code:
+        type: string
+        description: >
+          ISO 3166-2 US state/territory code of the administering jurisdiction.
+        minLength: 2
+        maxLength: 2
+        example: "PA"
+
+      layer_id:
+        type: integer
+        description: >
+          Identifies which layer contract governs this request. Always 4 for
+          this contract.
+        enum: [4]
+        example: 4
+
+      # --- Layer-specific fields ---
+
+      exception_type:
+        type: string
+        description: >
+          A short machine-readable code classifying the exception category.
+          Your service should define the set of codes it recognizes in its
+          service registration. Common values include (but are not limited to):
+            VERIFICATION_MISMATCH — data returned by verification does not
+              match application data.
+            DOCUMENT_REJECTED     — uploaded document failed quality checks.
+            INTEGRATION_TIMEOUT   — a 3rd party service did not respond in time.
+            POLICY_CONFLICT       — conflicting program rules prevent processing.
+            DUPLICATE_CASE        — duplicate case detected post-initiation.
+            MANUAL_FLAG           — caseworker manually flagged the case.
+        example: "VERIFICATION_MISMATCH"
+
+      exception_data:
+        type: object
+        description: >
+          Structured context about the exception, provided by the originating
+          layer. Contents are layer-specific. Your service should handle
+          unknown fields gracefully. Common top-level keys include:
+            source_field    — the field or data element that triggered the exception.
+            expected_value  — what the system expected.
+            actual_value    — what was received.
+            error_code      — originating system error code.
+        additionalProperties: true
+        example:
+          source_field: "monthly_income_usd"
+          expected_value: "self-attested: 2100"
+          actual_value: "IRS verified: 3800"
+          error_code: "IRS_MISMATCH_412"
+          discrepancy_amount_usd: 1700
+
+      source_layer_id:
+        type: integer
+        description: >
+          The layer_id of the layer that raised this exception. Used by your
+          service to apply layer-specific resolution rules and to route
+          escalations back to the correct layer owner.
+        minimum: 1
+        maximum: 11
+        example: 5
+
+  example:
+    case_id: "CASE-2026-PA-00041872"
+    state_code: "PA"
+    layer_id: 4
+    exception_type: "VERIFICATION_MISMATCH"
+    source_layer_id: 5
+    exception_data:
+      source_field: "monthly_income_usd"
+      expected_value: "self-attested: 2100"
+      actual_value: "IRS verified: 3800"
+      error_code: "IRS_MISMATCH_412"
+      discrepancy_amount_usd: 1700
+
+# -----------------------------------------------------------------------------
+# RESPONSE SCHEMA
+# Returned by the 3rd party service from POST /invoke
+# -----------------------------------------------------------------------------
+response:
+  description: >
+    Your service must return this structure with HTTP 200 for all handled
+    requests. The status determines how the platform proceeds:
+      resolved  — exception cleared; platform resumes case processing.
+      escalated — exception routed to supervisor/manual review; case paused.
+      pending   — exception acknowledged; awaiting more information; case paused.
+  schema:
+    type: object
+    required:
+      - case_id
+      - status
+      - message
+      - resolution_notes
+    properties:
+
+      # --- Standard fields (required on every DPW layer response) ---
+
+      case_id:
+        type: string
+        description: >
+          Echo back the case_id from the request.
+        example: "CASE-2026-PA-00041872"
+
+      status:
+        type: string
+        description: >
+          Disposition of this exception.
+            resolved  — Exception has been resolved; case may continue.
+            escalated — Exception requires human intervention; case is paused.
+            pending   — Exception acknowledged but not yet resolved; case is paused.
+        enum:
+          - resolved
+          - escalated
+          - pending
+        example: "escalated"
+
+      message:
+        type: string
+        description: >
+          Human-readable summary of the disposition for caseworker visibility.
+        example: "Income discrepancy of $1,700/mo exceeds auto-resolve threshold. Escalated to supervisor queue."
+
+      # --- Layer-specific response fields ---
+
+      resolution_notes:
+        type: string
+        description: >
+          Detailed notes on how the exception was triaged or resolved. This
+          field is written to the case audit log and may be visible to the
+          applicant during appeals. Be factual and policy-neutral.
+        example: >
+          IRS-verified income ($3,800/mo) exceeds self-attested income ($2,100/mo)
+          by $1,700/mo, surpassing the $500/mo auto-resolve threshold for SNAP.
+          Case routed to income verification supervisor queue (ticket: SUP-2026-00821).
+
+  examples:
+    resolved:
+      case_id: "CASE-2026-PA-00041880"
+      status: "resolved"
+      message: "Document quality issue auto-resolved: re-processed with enhanced OCR."
+      resolution_notes: >
+        Original document upload failed initial OCR quality check (confidence: 61%).
+        Re-processed with enhanced OCR pipeline (confidence: 94%). Document accepted.
+        No caseworker action required.
+
+    escalated:
+      case_id: "CASE-2026-PA-00041872"
+      status: "escalated"
+      message: "Income discrepancy of $1,700/mo exceeds auto-resolve threshold. Escalated to supervisor queue."
+      resolution_notes: >
+        IRS-verified income ($3,800/mo) exceeds self-attested income ($2,100/mo)
+        by $1,700/mo, surpassing the $500/mo auto-resolve threshold for SNAP.
+        Case routed to income verification supervisor queue (ticket: SUP-2026-00821).
+
+    pending:
+      case_id: "CASE-2026-PA-00041881"
+      status: "pending"
+      message: "Integration timeout from external validation service. Retry scheduled in 4 hours."
+      resolution_notes: >
+        Layer 06 (External Validation) timed out after 30s when contacting
+        SSA wage records API. Retry attempt 1 of 3 scheduled for 2026-04-18T18:32:00Z.
+        Case processing paused pending retry outcome.
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
+# -----------------------------------------------------------------------------
+notes:
+  - >
+    When status is "resolved", the DPW platform will automatically resume
+    processing from the layer immediately following source_layer_id. Ensure
+    your resolution is complete before returning this status — partial
+    resolutions should use "pending".
+  - >
+    When status is "escalated" or "pending", the platform will pause the case
+    and notify the assigned caseworker (via Layer 08) with the resolution_notes
+    content. Write notes that are appropriate for caseworker consumption.
+  - >
+    Your service may receive the same case_id multiple times if exceptions
+    recur or if retries are triggered. Track exception history by case_id
+    to avoid redundant escalations.
+  - >
+    Auto-resolve thresholds (e.g., income discrepancy limits) should be
+    configured in your service per state_code, as policies vary by jurisdiction.
+  - >
+    resolution_notes is written to the permanent case audit log. Do not include
+    speculative language, applicant blame framing, or data not directly
+    relevant to the exception.
