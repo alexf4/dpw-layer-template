@@ -14,7 +14,7 @@ A registered app covers one **layer** of the benefit stack. There are 11 layers:
 
 | # | Layer | Direction | What it does |
 |---|---|---|---|
-| 1 | Awareness | State → Applicant | Delivers program outreach (SMS, email, mail, portal) |
+| 1 | Awareness | State → Applicant | Pull catalog — returns state-specific benefit programs so Benne can present them to applicants |
 | 2 | Application | Applicant → State | Receives and validates benefit applications |
 | 3 | Case Initiation | Internal | Opens a case, assigns a worker |
 | 4 | Exception Handling | Internal | Routes irregularities for resolution |
@@ -41,55 +41,100 @@ A registered app covers one **layer** of the benefit stack. There are 11 layers:
 
 ### Layer 1 — Awareness
 
-**What it does**: Delivers program awareness messages to prospective applicants via SMS, email,
-portal notification, or physical mail.
+**What it does**: Acts as a state-specific benefit program catalog. When Benne starts a new
+session, it calls this layer to find out what programs exist in the applicant's state — so it
+can present accurate, live information rather than relying on training data.
+
+**How it fits in the platform**
+
+```
+Applicant → Benne
+               │
+               │  awareness(case_id, state_code="IA", program_filter=[])
+               ▼
+         Platform API
+               │
+               ├──► Iowa Outreach Platform   (registered for IA, MN, WI)
+               │      returns: [SNAP, Medicaid, hawk-i, ...]
+               │
+               └──► Ohio Benefits Notifier   (registered for OH, IN, KY)
+                      returns: [SNAP, Medicaid, CHIP, ...]
+```
+
+Each registered app owns a catalog of programs for the states it covers. The platform routes
+to the right app based on `state_code`. Multiple apps serve different states — they never
+overlap on the same state.
 
 **Request fields**
 | Field | Type | Required | Description |
 |---|---|---|---|
 | case_id | string | ✓ | Threading key — echo in every response |
-| state_code | string | ✓ | Two-letter state code, e.g. "PA" |
+| state_code | string | ✓ | Two-letter state code, e.g. "IA" |
 | layer_id | integer | ✓ | Always `1` for this layer |
-| applicant_identifier | string | ✓ | Opaque platform-issued token for the applicant |
-| channel | enum | ✓ | `sms` / `email` / `portal` / `mail` |
-| program_codes | string[] | ✓ | e.g. `["SNAP", "MEDICAID"]` |
+| program_filter | string[] | — | If present, return only these program codes; if empty, return all |
+| context | object | — | Optional hints: `household_size`, `has_children`, `approximate_income`, `age_range` |
 
 **Response fields**
 | Field | Type | Required | Description |
 |---|---|---|---|
 | case_id | string | ✓ | Echo from request |
-| status | enum | ✓ | `sent` / `failed` / `queued` |
-| message | string | ✓ | Human-readable outcome for caseworkers |
-| delivery_details | object | — | Optional audit metadata (channel used, timestamp, etc.) |
+| status | enum | ✓ | `found` / `not_found` / `error` |
+| message | string | ✓ | Human-readable summary (e.g. "Found 3 programs in Iowa") |
+| programs | object[] | ✓ | List of benefit programs (empty array when `not_found` or `error`) |
+
+**Program object fields**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| code | string | ✓ | Program code, e.g. `"SNAP"` — used in downstream layers |
+| name | string | ✓ | Full program name, e.g. `"Supplemental Nutrition Assistance Program"` |
+| description | string | ✓ | Plain-language description — Benne reads this to applicants |
+| eligibility_hint | string | — | Brief eligibility summary (informational only — Layer 9 does the real check) |
+| how_to_apply | string | — | Instructions or URL |
+| program_url | string | — | Official state program page URL |
 
 **Valid statuses**
-- `sent` — message was successfully delivered
-- `failed` — delivery failed; return this instead of HTTP 500
-- `queued` — accepted for async delivery (e.g. mail batch)
+- `found` — one or more programs returned
+- `not_found` — no programs match (return empty `programs` array)
+- `error` — internal error; return this instead of HTTP 500
 
 **Example request**
 ```json
 {
-  "case_id": "CASE-2026-PA-00041872",
-  "state_code": "PA",
+  "case_id": "CASE-2026-IA-00041872",
+  "state_code": "IA",
   "layer_id": 1,
-  "applicant_identifier": "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f",
-  "channel": "email",
-  "program_codes": ["SNAP", "MEDICAID"]
+  "program_filter": [],
+  "context": {
+    "household_size": 3,
+    "has_children": true
+  }
 }
 ```
 
 **Example response**
 ```json
 {
-  "case_id": "CASE-2026-PA-00041872",
-  "status": "sent",
-  "message": "Awareness email delivered to applicant for programs: SNAP, MEDICAID.",
-  "delivery_details": {
-    "channel_used": "email",
-    "timestamp_utc": "2026-04-18T14:32:00Z",
-    "message_id": "msg-20260418-email-00289"
-  }
+  "case_id": "CASE-2026-IA-00041872",
+  "status": "found",
+  "message": "Found 3 benefit programs available in Iowa.",
+  "programs": [
+    {
+      "code": "SNAP",
+      "name": "Supplemental Nutrition Assistance Program",
+      "description": "Helps low-income households pay for groceries through an EBT card.",
+      "eligibility_hint": "Generally available to households earning below 130% of the federal poverty level.",
+      "how_to_apply": "Apply online at dhs.iowa.gov or call 1-877-347-5678.",
+      "program_url": "https://dhs.iowa.gov/food-assistance"
+    },
+    {
+      "code": "MEDICAID",
+      "name": "Iowa Health & Wellness Plan",
+      "description": "Free or low-cost health coverage for adults and families.",
+      "eligibility_hint": "Available to adults aged 19-64 earning up to 133% of the federal poverty level.",
+      "how_to_apply": "Apply at dhs.iowa.gov or through Healthcare.gov.",
+      "program_url": "https://dhs.iowa.gov/ime/members/medicaid-a-to-z/hh"
+    }
+  ]
 }
 ```
 
@@ -512,36 +557,53 @@ async def invoke(request: LayerRequest) -> LayerResponse:
 The `request` object is already validated against your layer's schema before this function
 is called. You don't need to re-validate it.
 
-**Template for a synchronous integration:**
+**Template for a catalog lookup (Layer 1 — Awareness):**
 ```python
 async def invoke(request: LayerRequest) -> LayerResponse:
     try:
-        result = call_your_data_source(
-            applicant_id=request.applicant_identifier,
+        programs = fetch_programs_for_state(
             state=request.state_code,
+            program_filter=request.program_filter,
+            context=request.context,
         )
+        if not programs:
+            return LayerResponse(
+                case_id=request.case_id,
+                status="not_found",
+                message=f"No programs found for {request.state_code}.",
+                programs=[],
+            )
         return LayerResponse(
             case_id=request.case_id,
-            status="sent",
+            status="found",
+            message=f"Found {len(programs)} programs in {request.state_code}.",
+            programs=programs,
+        )
+    except Exception as e:
+        return LayerResponse(
+            case_id=request.case_id,
+            status="error",
+            message=f"Catalog lookup failed: {e}",
+            programs=[],
+        )
+```
+
+**Template for a synchronous integration (most layers):**
+```python
+async def invoke(request: LayerRequest) -> LayerResponse:
+    try:
+        result = call_your_data_source(state=request.state_code)
+        return LayerResponse(
+            case_id=request.case_id,
+            status="submitted",  # use your layer's valid status
             message=f"Processed successfully for case {request.case_id}.",
         )
     except YourExternalAPIError as e:
         return LayerResponse(
             case_id=request.case_id,
-            status="failed",
+            status="error",
             message=f"External API error: {e}",
         )
-```
-
-**Template for an async integration (e.g. mail batch):**
-```python
-async def invoke(request: LayerRequest) -> LayerResponse:
-    job_id = enqueue_async_job(request)
-    return LayerResponse(
-        case_id=request.case_id,
-        status="queued",
-        message=f"Job {job_id} queued for processing.",
-    )
 ```
 
 ### Step 3 — Run compliance tests

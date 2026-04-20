@@ -3,28 +3,41 @@
 # =============================================================================
 #
 # PURPOSE
-#   This layer handles outreach and notification to applicants about available
-#   benefit programs. A registered 3rd party app implementing this layer is
-#   responsible for delivering program awareness messages via the specified
-#   channel (SMS, email, portal, or physical mail).
+#   This layer is a state-specific benefit program catalog. When called, a
+#   registered app returns the benefit programs available in its state,
+#   optionally filtered by program type or applicant context. Benne (the AI
+#   Benefits Social Worker) calls this layer at the start of every session to
+#   ground its responses in real, state-specific program data rather than
+#   training data.
+#
+# MENTAL MODEL
+#
+#   User → Benne → Platform → [Iowa Outreach Platform]  (registered for IA)
+#                           → [Ohio Benefits Notifier]  (registered for OH)
+#
+#   Each registered app is a catalog of one or more states' benefit programs.
+#   The platform routes to the right app based on state_code. Multiple apps
+#   can cover different states for the same layer — they never overlap on
+#   the same state.
 #
 # INTEGRATION PATTERN
 #   The DPW platform will POST to your registered /invoke endpoint.
 #   Your service must return the response body described below.
 #
 # CONTRACT VERSION
-#   version: "1.0"
+#   version: "2.0"
 #
 # =============================================================================
 
-version: "1.0"
+version: "2.0"
 
 layer:
   id: 1
   name: awareness
   description: >
-    Outreach and notification layer. Delivers program awareness messages to
-    prospective applicants through their preferred or available channel.
+    State-specific benefit program catalog. Returns available programs for a
+    given state so that Benne (or any caller) can present accurate, grounded
+    information to applicants without relying on training data.
 
 # -----------------------------------------------------------------------------
 # REQUEST SCHEMA
@@ -32,90 +45,80 @@ layer:
 # -----------------------------------------------------------------------------
 request:
   description: >
-    Payload sent by the DPW platform when requesting that a 3rd party awareness
-    service contact an applicant about one or more benefit programs.
+    Payload sent by the DPW platform requesting the benefit program catalog
+    for a given state. Optionally filtered by program codes or applicant
+    context.
   schema:
     type: object
     required:
       - case_id
       - state_code
       - layer_id
-      - applicant_identifier
-      - channel
-      - program_codes
     properties:
-
-      # --- Standard fields (required on every DPW layer request) ---
 
       case_id:
         type: string
         description: >
           Globally unique identifier for this case within the DPW platform.
-          Treat as an opaque string; do not parse internal structure.
-        example: "CASE-2026-PA-00041872"
+          Echo this value in every response.
+        example: "CASE-2026-IA-00041872"
 
       state_code:
         type: string
         description: >
-          ISO 3166-2 US state/territory code identifying the administering
-          jurisdiction (e.g., "PA" for Pennsylvania, "CA" for California).
+          Two-letter state code identifying the state whose programs to return.
         minLength: 2
         maxLength: 2
-        example: "PA"
+        example: "IA"
 
       layer_id:
         type: integer
-        description: >
-          Identifies which layer contract governs this request. Always 1 for
-          this contract. Validated by the platform before dispatch.
+        description: Always 1 for this layer.
         enum: [1]
         example: 1
 
-      # --- Layer-specific fields ---
-
-      applicant_identifier:
-        type: string
-        description: >
-          Opaque token identifying the applicant within the DPW platform.
-          Do NOT store or log this value alongside PII — it is a reference
-          handle, not a social security number or government ID.
-        example: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
-
-      channel:
-        type: string
-        description: >
-          The delivery channel to use for this awareness communication.
-          Your implementation is only required to support the channels
-          declared in your service registration.
-        enum:
-          - sms
-          - email
-          - portal
-          - mail
-        example: "email"
-
-      program_codes:
+      program_filter:
         type: array
         description: >
-          One or more DPW program codes for which the applicant should be
-          made aware. Your service should include relevant details for each
-          program in the outreach message.
+          Optional list of program codes to filter results. If omitted or empty,
+          return all programs your app covers for this state.
         items:
           type: string
-        minItems: 1
         example:
           - "SNAP"
           - "MEDICAID"
 
+      context:
+        type: object
+        description: >
+          Optional applicant context that your app may use to rank or filter
+          results. All fields are optional — handle gracefully if absent.
+        required: false
+        properties:
+          household_size:
+            type: integer
+            example: 3
+          has_children:
+            type: boolean
+            example: true
+          approximate_income:
+            type: string
+            description: Income range hint, e.g. "0-20000"
+            example: "0-20000"
+          age_range:
+            type: string
+            description: Applicant age range, e.g. "25-34"
+            example: "25-34"
+        additionalProperties: true
+
   example:
-    case_id: "CASE-2026-PA-00041872"
-    state_code: "PA"
+    case_id: "CASE-2026-IA-00041872"
+    state_code: "IA"
     layer_id: 1
-    applicant_identifier: "APPL-88f3a2c1-4d9b-4e10-a1a0-2f4b5c6d7e8f"
-    channel: "email"
-    program_codes:
-      - "SNAP"
-      - "MEDICAID"
+    program_filter: []
+    context:
+      household_size: 3
+      has_children: true
 
 # -----------------------------------------------------------------------------
 # RESPONSE SCHEMA
@@ -123,110 +126,138 @@ request:
 # -----------------------------------------------------------------------------
 response:
   description: >
-    Your service must return this structure with HTTP 200 for all handled
-    requests — including delivery failures. Use HTTP 4xx/5xx only for
-    transport-level or authentication errors, not business-logic outcomes.
+    Return the benefit programs available in the requested state. Always
+    return HTTP 200 — use status="not_found" for states with no programs,
+    not HTTP 404.
   schema:
     type: object
     required:
       - case_id
       - status
       - message
+      - programs
     properties:
-
-      # --- Standard fields (required on every DPW layer response) ---
 
       case_id:
         type: string
-        description: >
-          Echo back the case_id from the request. The platform uses this to
-          correlate responses with in-flight cases.
-        example: "CASE-2026-PA-00041872"
+        description: Echo from request.
+        example: "CASE-2026-IA-00041872"
 
       status:
         type: string
         description: >
-          Outcome of the awareness delivery attempt.
-            sent    — Message was successfully delivered to the channel.
-            failed  — Delivery failed; see message for details.
-            queued  — Message accepted but deferred (e.g., mail batch).
+          Outcome of the catalog lookup.
+            found       — One or more programs returned.
+            not_found   — No programs match the request (empty programs list).
+            error       — App encountered an internal error.
         enum:
-          - sent
-          - failed
-          - queued
-        example: "sent"
+          - found
+          - not_found
+          - error
+        example: "found"
 
       message:
         type: string
-        description: >
-          Human-readable summary of the outcome. Include enough detail for
-          a caseworker to understand what happened without reading logs.
-        example: "Awareness email delivered to applicant for programs: SNAP, MEDICAID."
+        description: Human-readable summary for caseworkers and Benne.
+        example: "Found 6 benefit programs available in Iowa."
 
-      # --- Layer-specific response fields ---
-
-      delivery_details:
-        type: object
+      programs:
+        type: array
         description: >
-          Optional additional metadata about the delivery. Useful for
-          audit trails and caseworker visibility. Structure is flexible
-          but should be serializable JSON.
-        required: false
-        additionalProperties: true
-        example:
-          channel_used: "email"
-          timestamp_utc: "2026-04-18T14:32:00Z"
-          message_id: "msg-20260418-email-00289"
-          recipient_masked: "a***@example.com"
+          List of benefit programs available in this state. Empty array when
+          status is not_found or error.
+        items:
+          type: object
+          required:
+            - code
+            - name
+            - description
+          properties:
+            code:
+              type: string
+              description: Program code used in downstream layer calls (e.g. Layer 2 Application).
+              example: "SNAP"
+            name:
+              type: string
+              description: Full human-readable program name.
+              example: "Supplemental Nutrition Assistance Program"
+            description:
+              type: string
+              description: >
+                Plain-language description of what the program provides.
+                Written for applicants, not caseworkers.
+              example: "Helps low-income households pay for groceries through an EBT card."
+            eligibility_hint:
+              type: string
+              description: >
+                Brief, plain-language eligibility summary. Not a legal
+                determination — used by Benne to set expectations before
+                the full eligibility check (Layer 9).
+              required: false
+              example: "Generally available to households earning below 130% of the federal poverty level."
+            how_to_apply:
+              type: string
+              description: Brief instructions or URL for starting an application.
+              required: false
+              example: "Apply online at dhs.iowa.gov or in person at your local DHS office."
+            program_url:
+              type: string
+              description: Official state program page URL.
+              required: false
+              example: "https://dhs.iowa.gov/food-assistance"
 
   examples:
-    success:
-      case_id: "CASE-2026-PA-00041872"
-      status: "sent"
-      message: "Awareness email delivered to applicant for programs: SNAP, MEDICAID."
-      delivery_details:
-        channel_used: "email"
-        timestamp_utc: "2026-04-18T14:32:00Z"
-        message_id: "msg-20260418-email-00289"
-        recipient_masked: "a***@example.com"
+    found:
+      case_id: "CASE-2026-IA-00041872"
+      status: "found"
+      message: "Found 3 benefit programs available in Iowa."
+      programs:
+        - code: "SNAP"
+          name: "Supplemental Nutrition Assistance Program"
+          description: "Helps low-income households pay for groceries through an EBT card."
+          eligibility_hint: "Generally available to households earning below 130% of the federal poverty level."
+          how_to_apply: "Apply online at dhs.iowa.gov or call 1-877-347-5678."
+          program_url: "https://dhs.iowa.gov/food-assistance"
+        - code: "MEDICAID"
+          name: "Iowa Health & Wellness Plan"
+          description: "Free or low-cost health coverage for adults and families."
+          eligibility_hint: "Available to adults aged 19-64 earning up to 133% of the federal poverty level."
+          how_to_apply: "Apply at dhs.iowa.gov or through Healthcare.gov."
+          program_url: "https://dhs.iowa.gov/ime/members/medicaid-a-to-z/hh"
+        - code: "CHIP"
+          name: "hawk-i (Healthy and Well Kids in Iowa)"
+          description: "Low-cost health coverage for children in families that earn too much for Medicaid."
+          eligibility_hint: "Available for children under 19 in households earning up to 302% of the federal poverty level."
+          how_to_apply: "Apply at dhs.iowa.gov or call 1-800-257-8563."
+          program_url: "https://dhs.iowa.gov/hawki"
 
-    queued:
-      case_id: "CASE-2026-PA-00041873"
-      status: "queued"
-      message: "Physical mail queued for next batch processing on 2026-04-19."
-      delivery_details:
-        channel_used: "mail"
-        batch_id: "BATCH-2026-04-19-AM"
-        estimated_delivery: "2026-04-23"
-
-    failed:
-      case_id: "CASE-2026-PA-00041874"
-      status: "failed"
-      message: "SMS delivery failed: invalid or unsubscribed phone number on record."
-      delivery_details:
-        channel_used: "sms"
-        error_code: "INVALID_NUMBER"
-        timestamp_utc: "2026-04-18T14:33:01Z"
+    not_found:
+      case_id: "CASE-2026-IA-00041873"
+      status: "not_found"
+      message: "No programs found matching the requested filter."
+      programs: []
 
 # -----------------------------------------------------------------------------
 # IMPLEMENTATION NOTES FOR 3RD PARTY DEVELOPERS
 # -----------------------------------------------------------------------------
 notes:
   - >
-    Your POST /invoke endpoint must respond within the platform SLA (default:
-    30 seconds). For async channels like mail, return status "queued"
-    immediately and handle batch delivery out-of-band.
+    Your app is a catalog for one or more states. Register it for each state
+    you cover. The platform routes requests to the correct app based on
+    state_code.
   - >
-    Do not include raw PII (SSN, DOB, full name) in delivery_details.
-    Mask or omit sensitive values as shown in the examples above.
+    program_filter is optional. If absent, return all programs you have data
+    for in the requested state. If present, filter to only the requested codes.
   - >
-    The applicant_identifier is a platform-issued handle. Your service must
-    resolve it to a contact address using the DPW Identity Resolution API
-    before attempting delivery.
+    context is optional and may be absent entirely. Never require it — use it
+    only to rank or filter results when present.
   - >
-    If you cannot resolve the applicant_identifier to a valid contact for
-    the requested channel, return status "failed" with a descriptive message.
+    Keep descriptions in plain language. Benne reads these directly to
+    applicants. Avoid jargon, acronyms without explanation, and legal disclaimers.
   - >
-    Program codes follow the DPW Program Registry. Your service should
-    gracefully handle unknown codes by noting them in delivery_details rather
-    than hard-failing the entire request.
+    eligibility_hint is informational only. The actual eligibility determination
+    happens in Layer 9. Do not make binding determinations here.
+  - >
+    Respond within the platform SLA (default: 30 seconds). For large catalogs,
+    cache aggressively — this endpoint is called at the start of every Benne
+    session.

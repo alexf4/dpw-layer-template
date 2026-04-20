@@ -12,25 +12,42 @@ from typing import Literal
 
 LAYER_ID = 1  # Change this to your layer number (1-11)
 
-CONTRACT_VERSION = "1.0"  # Sync date: 2026-04-19
+CONTRACT_VERSION = "2.0"  # Sync date: 2026-04-19
 
 
 # ── Layer 1 — Awareness ────────────────────────────────────────────────────────
+
+class AwarenessContext(BaseModel):
+    household_size: int | None = None
+    has_children: bool | None = None
+    approximate_income: str | None = None
+    age_range: str | None = None
+
+    model_config = {"extra": "allow"}
+
 
 class Layer1Request(BaseModel):
     case_id: str
     state_code: str
     layer_id: Literal[1] = 1
-    applicant_identifier: str
-    channel: Literal["sms", "email", "portal", "mail"]
-    program_codes: list[str]
+    program_filter: list[str] = []
+    context: AwarenessContext | None = None
+
+
+class BenefitProgram(BaseModel):
+    code: str
+    name: str
+    description: str
+    eligibility_hint: str | None = None
+    how_to_apply: str | None = None
+    program_url: str | None = None
 
 
 class Layer1Response(BaseModel):
     case_id: str
-    status: Literal["sent", "failed", "queued"]
+    status: Literal["found", "not_found", "error"]
     message: str
-    delivery_details: dict | None = None
+    programs: list[BenefitProgram] = []
 
 
 # ── Layer 2 — Application ──────────────────────────────────────────────────────
@@ -236,7 +253,7 @@ LayerRequest = _REQUEST_MODELS[LAYER_ID - 1]
 LayerResponse = _RESPONSE_MODELS[LAYER_ID - 1]
 
 VALID_STATUSES = {
-    1: ["sent", "failed", "queued"],
+    1: ["found", "not_found", "error"],
     2: ["submitted", "draft", "error"],
     3: ["initiated", "duplicate", "error"],
     4: ["resolved", "escalated", "pending"],
