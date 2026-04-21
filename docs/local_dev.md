@@ -1,5 +1,10 @@
 # Local Development Guide
 
+## Prerequisites
+
+- Python 3.11+
+- `pip` or a virtual environment manager of your choice
+
 ## Setup
 
 ```bash
@@ -7,40 +12,60 @@
 git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
 cd YOUR_REPO_NAME
 
-# Copy env file
-cp .env.example .env
-# Edit .env — set DPW_API_KEY to any value for local dev
+# Create and activate a virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Copy and configure env
+cp .env.example .env
+# .env only needs DPW_API_KEY — set it to any string for local dev:
+#   DPW_API_KEY=test
 ```
 
 ## Running the App
 
 ```bash
-uvicorn app.main:app --reload
+DPW_API_KEY=test uvicorn app.main:app --reload
 ```
 
-App runs at http://localhost:8000. Swagger UI at http://localhost:8000/docs.
+- App: http://localhost:8000
+- Swagger UI: http://localhost:8000/docs
+- Health check: http://localhost:8000/health
 
 ## Running with Docker
 
 ```bash
+# Requires .env to exist with DPW_API_KEY set
 docker compose up --build
 ```
 
 ## Running Tests
 
-### Unit tests (no server needed)
+### Unit tests — no server needed
+
+These test `invoke()` in isolation.
 
 ```bash
-pytest tests/test_invoke.py -v
+DPW_API_KEY=test pytest tests/test_invoke.py -v
 ```
 
-These test `invoke()` directly. Before you implement it, all 4 will fail with
-`NotImplementedError` — that's expected.
+Before you implement `invoke()`, all 4 will fail with `NotImplementedError` — that's expected.
 
-### Compliance tests (requires running server)
+Expected output after implementing `invoke()`:
+
+```
+tests/test_invoke.py::test_invoke_returns_layer_response PASSED
+tests/test_invoke.py::test_invoke_echoes_case_id PASSED
+tests/test_invoke.py::test_invoke_returns_valid_status PASSED
+tests/test_invoke.py::test_invoke_returns_nonempty_message PASSED
+```
+
+### Compliance tests — requires a running server
+
+These test the full HTTP stack against a live server.
 
 ```bash
 # Terminal 1: start the server
@@ -55,6 +80,35 @@ Expected before implementing `invoke()`:
 - FAIL: valid request, case_id echo, valid status, message, idempotency (5 tests)
 
 Expected after implementing `invoke()`: all 10 pass.
+
+## Trying It Manually
+
+Basic invocation (replace field values for your layer):
+
+```bash
+curl -s -X POST http://localhost:8000/invoke \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: test" \
+  -d '{
+    "case_id": "CASE-2026-XX-00000001",
+    "state_code": "PA",
+    "layer_id": 1
+  }' | python -m json.tool
+```
+
+Trigger the `not_found` / no-match path by passing a filter your app doesn't cover:
+
+```bash
+curl -s -X POST http://localhost:8000/invoke \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: test" \
+  -d '{
+    "case_id": "CASE-2026-XX-00000002",
+    "state_code": "PA",
+    "layer_id": 1,
+    "program_filter": ["UNKNOWN_CODE"]
+  }' | python -m json.tool
+```
 
 ## Switching Layers
 
@@ -73,15 +127,17 @@ Expected after implementing `invoke()`: all 10 pass.
 
 ## Debugging
 
-The app logs every invocation at INFO level:
+The app logs every invocation:
 
 ```
-INFO:app.main:invoke layer=1 case=CASE-TEST-001 state=PA
+INFO:app.main:invoke layer=1 case=CASE-2026-XX-00000001 state=PA
 ```
 
-Raise `LOG_LEVEL=DEBUG` in `.env` for more verbose output.
+Set `LOG_LEVEL=DEBUG` in `.env` for more verbose output.
 
-If a compliance test fails unexpectedly, check:
-- Is the server running? (`curl http://localhost:8000/health`)
-- Is `DPW_API_KEY` set and matching in both `.env` and the test env var?
-- Is `LAYER_ID` set correctly in `app/models.py`?
+| Symptom | Fix |
+|---|---|
+| `422 Unprocessable Entity` on `/invoke` | Missing or malformed `x-api-key` header or request body field |
+| `401 Unauthorized` | `x-api-key` header value doesn't match `DPW_API_KEY` in your env |
+| `ValidationError` on startup | `DPW_API_KEY` not set — check your `.env` file |
+| Tests fail with `Connection refused` | Server isn't running; start it with `uvicorn app.main:app --reload` |
